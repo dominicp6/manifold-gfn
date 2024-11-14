@@ -1,0 +1,5 @@
+logdir:
+  root: /home/sebidom/dom/manifold_contgfn/manifold-gfn/logs
+data:
+  root: /home/sebidom/dom/manifold_contgfn/manifold-gfn/data
+  alanine_dipeptide: /home/sebidom/dom/manifold_contgfn/manifold-gfn/data/alanine_dipeptide_conformers_1.npy
