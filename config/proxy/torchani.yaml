@@ -1,4 +1,0 @@
-_target_: gflownet.proxy.conformers.torchani.TorchANIMoleculeEnergy
-
-model: ANI2x
-use_ensemble: True
