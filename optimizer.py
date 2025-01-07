@@ -1,14 +1,13 @@
-# TODO: figure out why the z_dim can be larger than 1
-# TODO: match lr_z_mult with that of original code
 
 class OptimizerConfig:
     def __init__(self, 
                  loss='trajectorybalance', 
                  lr=0.0001,
-                 lr_z_mult = 3, 
+                 lr_z_mult = 10, 
                  lr_decay_period=1000000, 
                  lr_decay_gamma=0.5, 
                  z_dim=16,
+                 initial_z_scaling=50.0,
                  method='adam', 
                  early_stopping=0.0, 
                  ema_alpha=0.5, 
@@ -23,6 +22,7 @@ class OptimizerConfig:
                  steps_per_batch=3,
                  gradient_clipping = True,):
         self.z_dim = z_dim
+        self.initial_z_scaling = initial_z_scaling
         self.loss = loss
         self.lr = lr
         self.lr_z_mult = lr_z_mult
