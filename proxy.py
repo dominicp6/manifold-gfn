@@ -94,7 +94,6 @@ class MoleculeEnergyBase(Proxy, ABC):
         self.clamp = clamp
         self.max_energy = None
         self.min_energy = None
-        self.min = None
         self.skip_setup = skip_setup
 
     @abstractmethod
@@ -118,7 +117,6 @@ class MoleculeEnergyBase(Proxy, ABC):
         if self.skip_setup:
             self.max_energy = 0
             self.min_energy = -1
-            self.min = -1
         else:
             randomly_sampled_states = 2 * np.pi * np.random.rand(self.n_samples, env.n_dim)
             energies = self.compute_energies(*env.statebatch2conformerbatch(randomly_sampled_states)).cpu().numpy()
@@ -129,12 +127,6 @@ class MoleculeEnergyBase(Proxy, ABC):
             if self.remove_outliers:
                 self.max_energy = np.quantile(energies, 0.99)
                 self.min_energy = np.quantile(energies, 0.01)
-
-            if self.normalize:
-                # TODO: we still haven't made sense of this
-                self.min = -1
-            else:
-                self.min = self.min_energy - self.max_energy
 
 
 TORCHANI_MODELS = {
@@ -148,22 +140,17 @@ class TorchANIMoleculeEnergy(MoleculeEnergyBase):
     def __init__(
         self,
         model: str = "ANI2x",
-        use_ensemble: bool = True,
         batch_size: Optional[int] = 128,
         n_samples: int = 10000,
         normalize: bool = True,
         skip_setup: bool = False,
         **kwargs,
     ):
-        # TODO: check whether they activated flag use_ensemble in the original code
         """
         Parameters
         ----------
         model : str
             The name of the pretrained model to be used for prediction.
-
-        use_ensemble : bool
-            Whether to use whole ensemble of the models for prediction or only the first one.
 
         batch_size : int
             Batch size for TorchANI. If none, will process all states as a single batch.
@@ -180,9 +167,7 @@ class TorchANIMoleculeEnergy(MoleculeEnergyBase):
                 f"but only {set(TORCHANI_MODELS.keys())} are available."
             )
 
-        self.model = TORCHANI_MODELS[model](
-            periodic_table_index=True, model_index=None if use_ensemble else 0
-        ).to(self.device)
+        self.model = TORCHANI_MODELS[model](periodic_table_index=True, model_index=None).to(self.device)
 
     @torch.no_grad()
     def compute_energies(self, atomic_numbers, conformations_positions) -> Tensor:
