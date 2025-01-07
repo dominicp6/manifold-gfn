@@ -3,6 +3,7 @@ GFlowNet
 """
 from typing import Optional
 from copy import copy
+from itertools import chain
 
 import torch
 import torch.nn as nn
@@ -31,7 +32,8 @@ class GFlowNet:
         self.traj_length = self.env.traj_length
         self.batch_size = batch_size
 
-        self.logZ = nn.Parameter(torch.ones(optimizer_config.z_dim) * 150.0 / 64) # TODO: what is z_dim? what is 150.0 / 64?
+        # Define logZ as the SUM of the values in this tensor. Dimension > 1 only to accelerate learning.
+        self.logZ = nn.Parameter(optimizer_config.initial_z_scaling * torch.ones(optimizer_config.z_dim) / optimizer_config.z_dim) 
 
         # Buffers
         self.replay_sampling = replay_sampling
@@ -66,20 +68,16 @@ class GFlowNet:
         lr_scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=self.opt_config.lr_decay_period, gamma=self.opt_config.lr_decay_gamma)
         self.lr_scheduler = lr_scheduler
         
-        # TODO: global consistency between batch_size and batchsize nomencalture
-
-
     def parameters(self):
-        return list(self.forward_policy.model.parameters()) + list(self.backward_policy.model.parameters())
+        return chain(self.forward_policy.model.parameters(), self.backward_policy.model.parameters())
     
     def optimization_step(self, loss):
         loss.backward()
         if self.opt_config.gradient_clipping:
-            # TODO: do we need to keep on calling self.parameters() in this way
             torch.nn.utils.clip_grad_norm_(self.parameters(), self.opt_config.clip_value)
         self.opt.step()
-        self.lr_scheduler.step()
         self.opt.zero_grad()
+        self.lr_scheduler.step()
     
     def sample_action(self, state, backward: Optional[bool] = False):
         if backward:
@@ -91,8 +89,7 @@ class GFlowNet:
         policy_output = model(policy_state)
 
         # Sample actions from policy outputs
-        # TODO: more efficient way to use logprobs 
-        action, _ = self.env.sample_actions_batch(policy_output, state, backward)
+        action = self.env.sample_actions_batch(policy_output, state, backward)
 
         return action, policy_state
     
@@ -149,9 +146,8 @@ class GFlowNet:
     def compute_logprobs_trajectories(self, batch: Batch, backward: bool = False):
         if backward:
             # Backward trajectories
-            # TODO: I don't think the batch log function will work correctly for backward trajectories
             policy_output_b = self.backward_policy(batch.policy_states)
-            logprobs = self.env.get_traj_batch_logprobs(policy_output_b, batch.actions)
+            logprobs = self.env.get_traj_batch_logprobs(policy_output_b, batch.actions, backwards=True)
         else:
             # Forward trajectories
             policy_output_f = self.forward_policy(batch.policy_states)

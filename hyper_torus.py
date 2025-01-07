@@ -1,4 +1,3 @@
-import copy
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -8,7 +7,7 @@ from torch.distributions import Categorical, MixtureSameFamily, VonMises
 from torchtyping import TensorType
 from torchtyping import TensorType
 
-from utils.common import copy, tfloat, set_float_precision
+from utils.common import set_float_precision
 
 
 class HyperTorus:
@@ -23,11 +22,9 @@ class HyperTorus:
         self.policy_input_dim = self.n_dim * self.encoding_multiplier * 2 + 1
         self.policy_output_dim = self.n_dim * self.n_comp * 3
 
-        # TODO: change so not python lists
         self.source_angles = torch.zeros(self.n_dim)
         self.source = torch.zeros(self.n_dim + 1)
         self.state = self.source
-        self.eos = (self.n_dim, 0) # End Of Sequence action
 
         self.device = device
         self.float = set_float_precision(float_precision)
@@ -39,13 +36,6 @@ class HyperTorus:
         print(f"n_comp: {self.n_comp}")
         print(f"traj_length: {self.traj_length}")
         print(f"encoding_multiplier: {self.encoding_multiplier}")
-
-    def get_policy_output(self, params: dict) -> TensorType["policy_output_dim"]:
-        policy_output = np.ones(self.n_dim * self.n_comp * 3)
-        # TODO: update and correct
-        policy_output[1::3] = params["vonmises_mean"]
-        policy_output[2::3] = params["vonmises_concentration"]
-        return policy_output
     
     # TODO: possibly clean up these two functions below
     def get_mixture_distribution(self, policy_outputs: TensorType["batch_size", "policy_output_dim"]):
@@ -133,7 +123,7 @@ class HyperTorus:
         policy_outputs: TensorType["batch_size", "policy_output_dim"],
         states_from: Optional[List] = None,
         backward: Optional[bool] = False,
-    ) -> Tuple[List[Tuple], TensorType["n_states"]]:
+    ) -> Tuple[TensorType["batch_size, traj_length, n_dim"], TensorType["batch_size"]]:
 
         mixture_distribution, batch_size = self.get_mixture_distribution(policy_outputs)
 
@@ -143,27 +133,27 @@ class HyperTorus:
 
         # Sample angles and evaluate logprobs
         actions_tensor = mixture_distribution.sample()
-        logprobs = mixture_distribution.log_prob(actions_tensor)
-        logprobs = torch.sum(logprobs, axis=1)
 
         # Catch special case for backwards back-to-source (BTS) actions
         if backward:
-            source_angles = tfloat(self.source[: self.n_dim], float_type=self.float, device=self.device)
-            # TODO: do we need this tfloat function?
-            states_from_angles = tfloat(states_from, float_type=self.float, device=self.device)[:, : self.n_dim]
+            source_angles = self.source[: self.n_dim]
+            states_from_angles = states_from[:, : self.n_dim]
             actions_bts = states_from_angles - source_angles
             actions_tensor = actions_bts
 
-        return actions_tensor, logprobs
+        return actions_tensor
 
     def get_traj_batch_logprobs(
         self,
         policy_outputs: TensorType["batch_size", "traj_length + 1", "policy_output_dim"],
         actions: TensorType["batch_size", "traj_length", "n_dim"],
+        backwards: bool = False,
     ) -> TensorType["batch_size"]:
         # Ignore the last policy output because it is not used
-        # TODO: remove the need for a last policy output all together?
-        mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, :-1, :])
+        if backwards:
+            mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, 1:, :])
+        else:
+            mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, :-1, :])
         logprobs = mixture_distribution.log_prob(actions)
         logprobs = logprobs.sum(dim=(1, 2))
 

@@ -55,7 +55,9 @@ class ConformerEnvironment(HyperTorus):
 
         self.graph = MolDGLFeaturizer(ad_atom_types).mol2dgl(self.conformer.rdk_mol)
         
-        rotatable_edges = [ta[1:3] for ta in self.torsion_angles] # TODO: why ta[1:3]?
+        # Add a feature to the edges to indicate whether they are rotatable or not
+        # Note: Central two atoms in a 4-atom torsion angle correspond to a rotatable bond
+        rotatable_edges = [torsion_angle[1:3] for torsion_angle in self.torsion_angles] 
         for i in range(self.graph.num_edges()):
             if (self.graph.edges()[0][i].item(), self.graph.edges()[1][i].item()) not in rotatable_edges:
                 self.graph.edata["rotatable_edges"][i] = False
@@ -92,15 +94,20 @@ class ConformerEnvironment(HyperTorus):
             self.conformer.set_torsion_angle(ta, state[idx])
         return self.conformer
     
-    def statebatch2conformerbatch(self, states: TensorType["batchsize", "n_dim"]) -> tuple[TensorType["N_atoms"], TensorType["batchsize", "N_atoms", 3]]:
+    def statebatch2conformerbatch(self, states: TensorType["batch_size", "n_dim"]) -> tuple[TensorType["batch_size", "N_atoms"], TensorType["batch_size", "N_atoms", 3]]:
         """
-        Returns two Tensors. The first is a list of atomic numbers for the conformer.
-        The second is a Tensor with dimensionality (batchsize, N_atoms, 3), which encodes 
-        atomic positions for the batch of states.
+        Converts a batch of states to a batch of conformers.
+
+        Args:
+        - states: Tensor with dimensionality (batch_size, n_dim), which encodes torsion angles for the batch of states.
+
+        Returns:
+        - atomic_numbers: Tensor with dimensionality (batch_size, N_atoms), which encodes atomic numbers for the batch of states.
+        - conformers_coords: Tensor with dimensionality (batch_size, N_atoms, 3), which encodes atomic positions for the batch of states.
         """
-        # TODO: replace states.shape[0] with a more readable reference to batchsize
-        atomic_numbers = torch.zeros((states.shape[0], self.conformer.get_n_atoms()), dtype=torch.int32)
-        conformers_coords = torch.zeros((states.shape[0], self.conformer.get_n_atoms(), 3))
+        batch_size = states.shape[0]
+        atomic_numbers = torch.zeros((batch_size, self.conformer.get_n_atoms()), dtype=torch.int32)
+        conformers_coords = torch.zeros((batch_size, self.conformer.get_n_atoms(), 3))
         for conf_idx in range(states.shape[0]):
             conf = self.sync_conformer_with_state(states[conf_idx])
             conformers_coords[conf_idx] = torch.tensor(conf.get_atom_positions()) 
