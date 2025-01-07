@@ -1,9 +1,9 @@
+import pickle
+
 import numpy as np
 import torch
 
 from batch import Batch
-
-# TODO: add ability to save replay buffers
 
 class GeneralisedRewardBuffer():
 
@@ -39,6 +39,21 @@ class GeneralisedRewardBuffer():
         log_rewards[n_priority:] = cyclic_log_rewards
 
         return terminal_states, log_rewards
+    
+    def save(self, path):
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+
+    def load(self, path, use_old_priority_ratio=False):
+        with open(path, "rb") as f:
+            buffer = pickle.load(f)
+        
+        self.cyclic_buffer = buffer.cyclic_buffer
+        self.priority_buffer = buffer.priority_buffer
+        self.size = buffer.size
+        assert self.env == buffer.env, "Loaded buffer does not match the current environment"
+        if use_old_priority_ratio:
+            self.priority_ratio = buffer.priority_ratio
 
 class RewardBuffer():
 
@@ -50,33 +65,31 @@ class RewardBuffer():
         self.size = 0
         self.full = False
 
-        self.terminal_states = torch.zeros((capacity, env.n_dim), device=device)
+        self.terminating_states = torch.zeros((capacity, env.n_dim), device=device)
         self.log_rewards = torch.full((capacity,), -torch.inf, dtype=torch.float32, device=device)
 
-    def add(self, terminal_states, log_rewards):
-        batchsize = terminal_states.shape[0]
-        assert batchsize > 0, "Batch size must be greater than 0 to add to a replay buffer"
-        if batchsize > self.capacity:
-            raise ValueError(f"Batch size {batchsize} exceeds buffer capacity {self.capacity}")
+    def add(self, terminating_states, log_rewards):
+        batch_size = terminating_states.shape[0]
+        assert batch_size > 0, "Batch size must be greater than 0 to add to a replay buffer"
+        if batch_size > self.capacity:
+            raise ValueError(f"Batch size {batch_size} exceeds buffer capacity {self.capacity}")
         
-        if self.current_index + batchsize < self.capacity:
-            self._insert(terminal_states, log_rewards, self.current_index, self.current_index + batchsize)
-            self.current_index += batchsize
+        if self.current_index + batch_size < self.capacity:
+            self._insert(terminating_states, log_rewards, self.current_index, self.current_index + batch_size)
+            self.current_index += batch_size
             if not self.full:
-                self.size += batchsize
+                self.size += batch_size
         else:
             remaining_capacity = self.capacity - self.current_index
-            self._insert(terminal_states[:remaining_capacity], log_rewards[:remaining_capacity], self.current_index, self.capacity)
-            self._insert(terminal_states[remaining_capacity:], log_rewards[remaining_capacity:], 0, batchsize - remaining_capacity)
-            self.current_index = batchsize - remaining_capacity
+            self._insert(terminating_states[:remaining_capacity], log_rewards[:remaining_capacity], self.current_index, self.capacity)
+            self._insert(terminating_states[remaining_capacity:], log_rewards[remaining_capacity:], 0, batch_size - remaining_capacity)
+            self.current_index = batch_size - remaining_capacity
             self.full = True
             self.size = self.capacity
 
         self.empty = False
 
-    def priority_add(self, terminal_states, log_rewards):
-        batchsize = terminal_states.shape[0]
-        assert batchsize > 0, "Batch size must be greater than 0 to add to a replay buffer"
+    def _get_priority_indices(self, log_rewards):
         high_mask = log_rewards > self.log_rewards.min()
         if not high_mask.any():
             # No high rewards to add
@@ -89,60 +102,80 @@ class RewardBuffer():
         sorted_indices = torch.argsort(total_rewards, descending=True)
 
         # Determine which indices to keep and replace
-        high_indices = sorted_indices[:-len(high_rewards)]
+        num_new_additions = len(high_rewards)
+        high_indices = sorted_indices[:-num_new_additions]
         
         # Find the len(high_rewards) indices of lowest reward (and if tied, of lowest index) to replace
-        indices_to_replace = torch.argsort(self.log_rewards, descending=False, stable=True)[:len(high_rewards)]
+        indices_to_replace = torch.argsort(self.log_rewards, descending=False, stable=True)[:num_new_additions]
 
         # Replace the states, policy_states, actions, and log_rewards
         indices_to_select = high_indices[high_indices >= self.capacity] - self.capacity
-        self.terminal_states[indices_to_replace] = terminal_states[indices_to_select]
+
+        return indices_to_replace, indices_to_select, num_new_additions
+
+    def priority_add(self, terminating_states, log_rewards):
+        batch_size = terminating_states.shape[0]
+        assert batch_size > 0, "Batch size must be greater than 0 to add to a replay buffer"
+
+        indices_to_replace, indices_to_select, num_new_additions = self._get_priority_indices(log_rewards)
+        
+        self.terminating_states[indices_to_replace] = terminating_states[indices_to_select]
         self.log_rewards[indices_to_replace] = log_rewards[indices_to_select]
 
         if not self.full:
-            self.size += len(high_rewards)
+            self.size += num_new_additions
             if self.size >= self.capacity:
                 self.full = True
                 self.size = self.capacity
 
     def _insert(self, states, log_rewards, start_idx, end_idx):
-        self.terminal_states[start_idx:end_idx] = states
+        self.terminating_states[start_idx:end_idx] = states
         self.log_rewards[start_idx:end_idx] = log_rewards
 
     def sample(self, batch_size):
         assert self.size > 0, "Buffer is empty"
         # TODO: consider whether this should be done on the CPU with numpy or on the GPU with torch
         indices = np.random.choice(self.size, batch_size, replace=False)
-        terminal_states = self.terminal_states[indices]
+        terminating_states = self.terminating_states[indices]
         log_rewards = self.log_rewards[indices]
 
-        return terminal_states, log_rewards
+        return terminating_states, log_rewards
+
+    def _get_biased_sample_indices(self, batch_size):
+        assert self.size > 0, "Buffer is empty"
+  
+        # Get a fraction alpha of the trajectories from the beta fraction of trajectories with 
+        # highest rewards and a fraction 1 - alpha of trajectories from the remaining.
+
+        # Compute the number of samples to draw
+        num_high_reward = int(self.alpha * batch_size)
+        num_other = batch_size - num_high_reward
+
+        valid_log_rewards = self.log_rewards[:self.size]
+
+        # Compute thresholds for the top and bottom beta fractions
+        top_threshold = self.beta * self.size
+        bottom_threshold = self.size - top_threshold
+
+        # Find indices of the top and bottom beta fractions
+        top_indices = np.argpartition(valid_log_rewards, -top_threshold)[-top_threshold:]
+        bottom_indices = np.argpartition(valid_log_rewards, bottom_threshold)[:bottom_threshold]
+
+        # Sample indices from the top and bottom sets
+        selected_top_indices = np.random.choice(top_indices, num_high_reward, replace=False)
+        selected_bottom_indices = np.random.choice(bottom_indices, num_other, replace=False)
+
+        indices = np.concatenate((selected_top_indices, selected_bottom_indices))
+
+        return indices
     
     def biased_sample(self, batch_size):
-        # TODO: needs to be fixed so that it does not select "empty" entries in the buffer
-        assert self.size > 0, "Buffer is empty"
-        raise NotImplementedError
-        # # Get a fraction alpha of the trajectories from the beta fraction of trajectories with 
-        # # highest rewards and a fraction 1 - alpha of trajectories from the remaining.
+        indices = self._get_biased_sample_indices(batch_size)
 
-        # num_top = int(self.alpha * batch_size)
-        # num_bottom = batch_size - num_top
+        terminating_states = self.terminating_states[indices]
+        log_rewards = self.log_rewards[indices]
 
-        # top_threshold = self.beta * len(self)
-        # bottom_threshold = len(self) - top_threshold
-
-        # top_indices = np.argpartition(self.log_rewards, -top_threshold)[-top_threshold:]
-        # bottom_indices = np.argpartition(self.log_rewards, bottom_threshold)[:bottom_threshold]
-
-        # selected_top_indices = np.random.choice(top_indices, num_top, replace=False)
-        # selected_bottom_indices = np.random.choice(bottom_indices, num_bottom, replace=False)
-
-        # indices = np.concatenate((selected_top_indices, selected_bottom_indices))
-
-        # terminal_states = self.terminal_states[indices]
-        # log_rewards = self.log_rewards[indices]
-
-        # return terminal_states, log_rewards
+        return terminating_states, log_rewards
     
     def compute_stats(self):
         mean_log_reward = np.mean(self.log_rewards)
@@ -150,108 +183,90 @@ class RewardBuffer():
 
         return mean_log_reward, std_log_reward
 
-# TODO: finish implementation of the TrajectoryBuffer
-# class TrajectoryBuffer(Buffer):
+class TrajectoryBuffer(RewardBuffer):
 
-#     def add(self, states, policy_states, actions, log_rewards):
-#         batchsize = states.shape[0]
-#         assert batchsize > 0, "Batch size must be greater than 0 to add to a replay buffer"
-#         if batchsize > self.capacity:
-#             raise ValueError(f"Batch size {batchsize} exceeds buffer capacity {self.capacity}")
+    def __init__(self, env, device, capacity: int):
+        super().__init__(env, device, capacity)
+        self.trajectories = torch.zeros((capacity, env.n_dim), device=device)
+        self.policy_trajectories = torch.zeros((capacity, env.policy_input_dim), device=device)
+        self.actions = torch.zeros((capacity, env.n_dim), device=device)
+
+    def add(self, trajectories, policy_trajectories, actions, log_rewards):
+        batch_size = trajectories.shape[0]
+        assert batch_size > 0, "Batch size must be greater than 0 to add to a replay buffer"
+        if batch_size > self.capacity:
+            raise ValueError(f"Batch size {batch_size} exceeds buffer capacity {self.capacity}")
         
-#         if self.current_index + batchsize < self.capacity:
-#             self._insert(states, policy_states, actions, log_rewards, self.current_index, self.current_index + batchsize)
-#             self.current_index += batchsize
-#         else:
-#             remaining_capacity = self.capacity - self.current_index
-#             self._insert(states[:remaining_capacity], policy_states[:remaining_capacity], actions[:remaining_capacity], log_rewards[:remaining_capacity], self.current_index, self.capacity)
-#             self._insert(states[remaining_capacity:], policy_states[remaining_capacity:], actions[remaining_capacity:], log_rewards[remaining_capacity:], 0, batchsize - remaining_capacity)
-#             self.current_index = batchsize - remaining_capacity
+        if self.current_index + batch_size < self.capacity:
+            self._insert(trajectories, policy_trajectories, actions, log_rewards, self.current_index, self.current_index + batch_size)
+            self.current_index += batch_size
+        else:
+            remaining_capacity = self.capacity - self.current_index
+            self._insert(trajectories[:remaining_capacity], policy_trajectories[:remaining_capacity], actions[:remaining_capacity], log_rewards[:remaining_capacity], self.current_index, self.capacity)
+            self._insert(trajectories[remaining_capacity:], policy_trajectories[remaining_capacity:], actions[remaining_capacity:], log_rewards[remaining_capacity:], 0, batch_size - remaining_capacity)
+            self.current_index = batch_size - remaining_capacity
 
-#         self.empty = False
+        self.empty = False
 
-#     def priority_add(self, states, policy_states, actions, log_rewards):
-#         batchsize = states.shape[0]
-#         assert batchsize > 0, "Batch size must be greater than 0 to add to a replay buffer"
-#         high_mask = log_rewards > self.log_rewards.min()
-#         if not high_mask.any():
-#             # No high rewards to add
-#             return
+    def priority_add(self, trajectories, policy_trajectories, actions, log_rewards):
+        batch_size = trajectories.shape[0]
+        assert batch_size > 0, "Batch size must be greater than 0 to add to a replay buffer"
         
-#         high_rewards = log_rewards[high_mask]
+        indices_to_replace, indices_to_select, num_new_additions = self._get_priority_indices(log_rewards)
 
-#         # Combine current and new rewards, then sort
-#         total_rewards = torch.cat((self.log_rewards, high_rewards))
-#         sorted_indices = torch.argsort(total_rewards, descending=True)
+        self.trajectories[indices_to_replace] = trajectories[indices_to_select]
+        self.policy_trajectories[indices_to_replace] = policy_trajectories[indices_to_select]
+        self.actions[indices_to_replace] = actions[indices_to_select]
+        self.log_rewards[indices_to_replace] = log_rewards[indices_to_select]
 
-#         # Determine which indices to keep and replace
-#         high_indices = sorted_indices[:len(high_rewards)]
-#         indices_to_keep = np.array(high_indices[high_indices < self.capacity])
-#         indices_to_replace = np.setdiff1d(np.arange(self.capacity), indices_to_keep)
+        if not self.full:
+            self.size += num_new_additions
+            if self.size >= self.capacity:
+                self.full = True
+                self.size = self.capacity
 
-#         # Replace the states, policy_states, actions, and log_rewards
-#         indices_to_select = high_indices[high_indices > self.capacity] - self.capacity
-#         self.states[indices_to_replace] = states[indices_to_select]
-#         self.policy_states[indices_to_replace] = policy_states[indices_to_select]
-#         self.actions[indices_to_replace] = actions[indices_to_select]
-#         self.log_rewards[indices_to_replace] = log_rewards[indices_to_select]
+    def _insert(self, trajectories, policy_trajectories, actions, log_rewards, start_idx, end_idx):
+        self.trajectories[start_idx:end_idx] = trajectories
+        self.policy_trajectories[start_idx:end_idx] = policy_trajectories
+        self.actions[start_idx:end_idx] = actions
+        self.log_rewards[start_idx:end_idx] = log_rewards
 
-#         self.empty = False
+    def sample(self, batch_size):
+        indices = np.random.choice(len(self), batch_size, replace=False)
+        batch = self._get_batch(indices)
 
-#     def _insert(self, states, policy_states, actions, log_rewards, start_idx, end_idx):
-#         self.states[start_idx:end_idx] = states
-#         self.policy_states[start_idx:end_idx] = policy_states
-#         self.actions[start_idx:end_idx] = actions
-#         self.log_rewards[start_idx:end_idx] = log_rewards
-
-#     def sample_terminal_states(self, batch_size):
-#         assert self.size > 0, "Buffer is empty"
-#         indices = np.random.choice(self.size, batch_size, replace=False)
-#         terminal_states, log_rewards = self._get_back_sampled_batch(indices)
-
-#         return terminal_states, log_rewards
-
-#     def sample(self, batch_size):
-#         indices = np.random.choice(len(self), batch_size, replace=False)
-#         batch = self._get_batch(indices)
-
-#         return batch
+        return batch
     
-#     def biased_sample(self, batch_size):
-#         # Get a fraction alpha of the trajectories from the beta fraction of trajectories with 
-#         # highest rewards and a fraction 1 - alpha of trajectories from the remaining.
+    def sample_terminating_states(self, batch_size):
+        assert self.size > 0, "Buffer is empty"
+        indices = np.random.choice(self.size, batch_size, replace=False)
+        terminating_states, log_rewards = self._get_terminating_states(indices)
 
-#         num_top = int(self.alpha * batch_size)
-#         num_bottom = batch_size - num_top
-
-#         top_threshold = self.beta * len(self)
-#         bottom_threshold = len(self) - top_threshold
-
-#         top_indices = np.argpartition(self.log_rewards, -top_threshold)[-top_threshold:]
-#         bottom_indices = np.argpartition(self.log_rewards, bottom_threshold)[:bottom_threshold]
-
-#         selected_top_indices = np.random.choice(top_indices, num_top, replace=False)
-#         selected_bottom_indices = np.random.choice(bottom_indices, num_bottom, replace=False)
-
-#         indices = np.concatenate((selected_top_indices, selected_bottom_indices))
-
-#         return self._get_batch(indices)
+        return terminating_states, log_rewards
     
-#     def _get_batch(self, indices):
-#         states = self.states[indices]
-#         actions = self.actions[indices]
-#         log_rewards = self.log_rewards[indices]
+    def biased_sample(self, batch_size):
+        # Get a fraction alpha of the trajectories from the beta fraction of trajectories with 
+        # highest rewards and a fraction 1 - alpha of trajectories from the remaining.
 
-#         return Batch(self.env, states=states, actions=actions, log_rewards=log_rewards)
+        indices = self._get_biased_sample_indices(batch_size)
+        return self._get_batch(indices)
     
-#     def _get_back_sampled_batch(self, indices):
-#         terminal_states = self.states[indices][:, -1, :-1]
-#         log_rewards = self.log_rewards[indices]
+    def biased_sample_terminating_states(self, batch_size):
+        indices = self._get_biased_sample_indices(batch_size)
+        terminating_states, log_rewards = self._get_terminating_states(indices)
 
-#         return terminal_states, log_rewards
+        return terminating_states, log_rewards
     
-#     def compute_stats(self):
-#         mean_log_reward = np.mean(self.log_rewards)
-#         std_log_reward = np.std(self.log_rewards)
+    def _get_batch(self, indices):
+        trajectories = self.trajectories[indices]
+        policy_trajectories = self.policy_trajectories[indices]
+        actions = self.actions[indices]
+        log_rewards = self.log_rewards[indices]
 
-#         return mean_log_reward, std_log_reward
+        return Batch(self.env, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
+    
+    def _get_terminating_states(self, indices):
+        terminating_states = self.trajectories[indices][:, -1, :-1]
+        log_rewards = self.log_rewards[indices]
+
+        return terminating_states, log_rewards
