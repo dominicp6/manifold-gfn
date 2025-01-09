@@ -5,6 +5,7 @@ from typing import Optional
 from copy import copy
 from itertools import chain
 
+import wandb
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -25,7 +26,6 @@ class GFlowNet:
         regular_capacity = 1000,
         priority_capacity = 500,
         priority_ratio = 0.5,
-        replay_sampling = True
     ):
         self.device = set_device(device)
         self.env = env
@@ -36,7 +36,6 @@ class GFlowNet:
         self.logZ = nn.Parameter(optimizer_config.initial_z_scaling * torch.ones(optimizer_config.z_dim) / optimizer_config.z_dim) 
 
         # Buffers
-        self.replay_sampling = replay_sampling
         self.buffer = GeneralisedRewardBuffer(self.env, self.device, regular_capacity, priority_capacity, priority_ratio)
 
         # Policy models
@@ -55,8 +54,6 @@ class GFlowNet:
         Set up the optimizer
         """
         params = self.parameters()
-        if not len(params):
-            return ValueError("No parameters found.")
         if self.opt_config.method == "adam":
             opt = torch.optim.Adam(params, self.opt_config.lr, betas=(self.opt_config.adam_beta1, self.opt_config.adam_beta2))
         elif self.opt_config.method == "msgd":
@@ -96,18 +93,17 @@ class GFlowNet:
     def backward_sample_trajectories(self, terminal_states):
         batch_size = terminal_states.shape[0]
         actions = torch.zeros((batch_size, self.traj_length, self.env.n_dim), device=self.device) 
-        states = torch.zeros((batch_size, self.traj_length + 1, self.env.n_dim + 1), device=self.device) 
-        policy_states = torch.zeros((batch_size, self.traj_length + 1, self.env.policy_input_dim), device=self.device)
-        states[:, -1, :] = torch.cat([terminal_states, self.traj_length * torch.ones(batch_size, 1, device=self.device)], dim=1) 
+        trajectories = torch.zeros((batch_size, self.traj_length + 1, self.env.n_dim + 1), device=self.device) 
+        policy_trajectories = torch.zeros((batch_size, self.traj_length + 1, self.env.policy_input_dim), device=self.device)
+        trajectories[:, -1, :] = torch.cat([terminal_states, self.traj_length * torch.ones(batch_size, 1, device=self.device)], dim=1) 
         
         for t in range(self.traj_length - 1, -1, -1):
             # t ranges from (self.trajectory_length - 1) to (0)
-            #  TODO: check the index when sampling actions
-            actions[:, t, :], policy_states[:, t, :] = self.sample_action(states[:, t + 1, :], backward=True)
-            self.env.step_backwards(actions[:, t, :], states[:, t, :])
-            states[:, t, :] = copy(self.env.state)
+            actions[:, t, :], policy_trajectories[:, t, :] = self.sample_action(trajectories[:, t + 1, :], backward=True)
+            self.env.step_backwards(actions[:, t, :], trajectories[:, t, :])
+            trajectories[:, t, :] = copy(self.env.state)
 
-        return states, policy_states, actions
+        return trajectories, policy_trajectories, actions
 
     @torch.no_grad()
     def sample_batch(self, n_onpolicy: int = 0, n_replay: int = 0):
@@ -117,24 +113,24 @@ class GFlowNet:
 
         # Initialise an on-policy batch 
         actions = torch.zeros((n_onpolicy, self.traj_length, self.env.n_dim), device=self.device) 
-        states = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.n_dim + 1), device=self.device) 
-        policy_states = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.policy_input_dim), device=self.device)
+        trajectories = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.n_dim + 1), device=self.device) 
+        policy_trajectories = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.policy_input_dim), device=self.device)
         log_rewards = torch.zeros(n_onpolicy, device=self.device)
 
-        states[:, 0, :] = self.env.source
+        trajectories[:, 0, :] = self.env.source
         # Generate on-policy trajectories
         for t in range(self.traj_length):
-            actions[:, t, :], policy_states[:, t, :] = self.sample_action(states[:, t, :])
-            states[:, t + 1, :] = self.env.step(actions[:, t, :], states[:, t, :])
+            actions[:, t, :], policy_trajectories[:, t, :] = self.sample_action(trajectories[:, t, :])
+            trajectories[:, t + 1, :] = self.env.step(actions[:, t, :], trajectories[:, t, :])
 
-        on_policy_batch = Batch(env=self.env, device=self.device, states=states, policy_states=policy_states, actions=actions)
+        on_policy_batch = Batch(env=self.env, device=self.device, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions)
         on_policy_batch.compute_rewards()
 
         # Sample a replay buffer batch if the buffer is not empty
         if self.buffer.size > 0:
             terminal_states, log_rewards = self.buffer.sample(n_replay)
-            states, policy_states, actions = self.backward_sample_trajectories(terminal_states)
-            replay_buffer_batch = Batch(env=self.env, device=self.device, states=states, policy_states=policy_states, actions=actions, log_rewards=log_rewards)
+            trajectories, policy_trajectories, actions = self.backward_sample_trajectories(terminal_states)
+            replay_buffer_batch = Batch(env=self.env, device=self.device, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
 
             # Merge the batches
             final_batch = on_policy_batch.merge(replay_buffer_batch)
@@ -146,11 +142,11 @@ class GFlowNet:
     def compute_logprobs_trajectories(self, batch: Batch, backward: bool = False):
         if backward:
             # Backward trajectories
-            policy_output_b = self.backward_policy(batch.policy_states)
+            policy_output_b = self.backward_policy(batch.policy_trajectories)
             logprobs = self.env.get_traj_batch_logprobs(policy_output_b, batch.actions, backwards=True)
         else:
             # Forward trajectories
-            policy_output_f = self.forward_policy(batch.policy_states)
+            policy_output_f = self.forward_policy(batch.policy_trajectories)
             logprobs = self.env.get_traj_batch_logprobs(policy_output_f, batch.actions)
         
         return logprobs
@@ -174,6 +170,7 @@ class GFlowNet:
             for opt_step in range(self.opt_config.steps_per_batch):
                 loss = self.trajectorybalance_loss(batch) 
                 self.optimization_step(loss)
+            wandb.log({"loss": loss.item()})
 
             self.buffer.add(batch)
     
