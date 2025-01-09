@@ -99,17 +99,18 @@ class RewardBuffer():
 
         # Combine current and new rewards, then sort
         total_rewards = torch.cat((self.log_rewards, high_rewards))
-        sorted_indices = torch.argsort(total_rewards, descending=True)
+        sorted_indices = torch.argsort(total_rewards, descending=False, stable=True)
 
         # Determine which indices to keep and replace
-        num_new_additions = len(high_rewards)
-        high_indices = sorted_indices[:-num_new_additions]
+        num_candidate_additions = len(high_rewards)
+        high_indices = sorted_indices[num_candidate_additions:]
+        low_indices = sorted_indices[:num_candidate_additions]
         
-        # Find the len(high_rewards) indices of lowest reward (and if tied, of lowest index) to replace
-        indices_to_replace = torch.argsort(self.log_rewards, descending=False, stable=True)[:num_new_additions]
-
         # Replace the states, policy_states, actions, and log_rewards
         indices_to_select = high_indices[high_indices >= self.capacity] - self.capacity
+        indices_to_replace = low_indices[low_indices < self.capacity]
+        assert len(indices_to_select) == len(indices_to_replace), f"Number of indices to select does not match number of indices to replace: {len(indices_to_select)} != {len(indices_to_replace)}"
+        num_new_additions = len(indices_to_select)
 
         return indices_to_replace, indices_to_select, num_new_additions
 
@@ -119,8 +120,9 @@ class RewardBuffer():
 
         indices_to_replace, indices_to_select, num_new_additions = self._get_priority_indices(log_rewards)
         
-        self.terminating_states[indices_to_replace] = terminating_states[indices_to_select]
-        self.log_rewards[indices_to_replace] = log_rewards[indices_to_select]
+        if indices_to_replace is not None:
+            self.terminating_states[indices_to_replace] = terminating_states[indices_to_select]
+            self.log_rewards[indices_to_replace] = log_rewards[indices_to_select]
 
         if not self.full:
             self.size += num_new_additions
