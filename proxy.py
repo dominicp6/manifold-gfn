@@ -52,11 +52,13 @@ class MoleculeEnergyBase(Proxy, ABC):
         self,
         batch_size: Optional[int] = 128,
         # TODO: change back to 10000 after debugging
-        n_samples: int = 100,
+        n_samples: int = 10000,
         normalize: bool = True,
         remove_outliers: bool = True,
         clamp: bool = True,
         skip_setup: bool = False,
+        max_energy: Optional[float] = None,
+        min_energy: Optional[float] = None,
         **kwargs,
     ):
         """
@@ -92,8 +94,8 @@ class MoleculeEnergyBase(Proxy, ABC):
         self.normalize = normalize
         self.remove_outliers = remove_outliers
         self.clamp = clamp
-        self.max_energy = None
-        self.min_energy = None
+        self.max_energy = max_energy
+        self.min_energy = min_energy
         self.skip_setup = skip_setup
 
     @abstractmethod
@@ -115,8 +117,7 @@ class MoleculeEnergyBase(Proxy, ABC):
 
     def setup(self, env):
         if self.skip_setup:
-            self.max_energy = 0
-            self.min_energy = -1
+            assert self.max_energy is not None and self.min_energy is not None, "If skip_setup is True, max_energy and min_energy must be provided."
         else:
             randomly_sampled_states = 2 * np.pi * np.random.rand(self.n_samples, env.n_dim)
             energies = self.compute_energies(*env.statebatch2conformerbatch(randomly_sampled_states)).cpu().numpy()
