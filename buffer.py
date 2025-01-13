@@ -7,11 +7,11 @@ from batch import Batch
 
 class GeneralisedRewardBuffer():
 
-    def __init__(self, env, device, capacity: int, priority_capacity: int, priority_ratio: float):
-        self.env = env
+    def __init__(self, n_dim, device, capacity: int, priority_capacity: int, priority_ratio: float):
         self.device = device
-        self.cyclic_buffer = RewardBuffer(env, device, capacity)
-        self.priority_buffer = RewardBuffer(env, device, priority_capacity)
+        self.n_dim = n_dim
+        self.cyclic_buffer = RewardBuffer(n_dim, device, capacity)
+        self.priority_buffer = RewardBuffer(n_dim, device, priority_capacity)
         self.priority_ratio = priority_ratio
         self.size = 0
 
@@ -21,7 +21,7 @@ class GeneralisedRewardBuffer():
         self.size = self.cyclic_buffer.size + self.priority_buffer.size
 
     def sample(self, batch_size):
-        terminal_states = torch.zeros((batch_size, self.env.n_dim), device=self.device)
+        terminal_states = torch.zeros((batch_size, self.n_dim), device=self.device)
         log_rewards = torch.zeros((batch_size), device=self.device)
 
         n_priority = int(self.priority_ratio * batch_size)
@@ -51,21 +51,21 @@ class GeneralisedRewardBuffer():
         self.cyclic_buffer = buffer.cyclic_buffer
         self.priority_buffer = buffer.priority_buffer
         self.size = buffer.size
-        assert self.env == buffer.env, "Loaded buffer does not match the current environment"
+        self.n_dim = buffer.n_dim
         if use_old_priority_ratio:
             self.priority_ratio = buffer.priority_ratio
 
 class RewardBuffer():
 
-    def __init__(self, env, device, capacity: int):
-        self.env = env
+    def __init__(self, n_dim, device, capacity: int):
         self.device = device
         self.capacity = capacity
         self.current_index = 0
         self.size = 0
         self.full = False
+        self.n_dim = n_dim
 
-        self.terminating_states = torch.zeros((capacity, env.n_dim), device=device)
+        self.terminating_states = torch.zeros((capacity, self.n_dim), device=device)
         self.log_rewards = torch.full((capacity,), -torch.inf, dtype=torch.float32, device=device)
 
     def add(self, terminating_states, log_rewards):
@@ -93,7 +93,7 @@ class RewardBuffer():
         high_mask = log_rewards > self.log_rewards.min()
         if not high_mask.any():
             # No high rewards to add
-            return
+            return None, None, None
         
         high_rewards = log_rewards[high_mask]
 
@@ -187,11 +187,11 @@ class RewardBuffer():
 
 class TrajectoryBuffer(RewardBuffer):
 
-    def __init__(self, env, device, capacity: int):
-        super().__init__(env, device, capacity)
-        self.trajectories = torch.zeros((capacity, env.n_dim), device=device)
-        self.policy_trajectories = torch.zeros((capacity, env.policy_input_dim), device=device)
-        self.actions = torch.zeros((capacity, env.n_dim), device=device)
+    def __init__(self, n_dim, policy_input_dim, device, capacity: int):
+        super().__init__(n_dim, device, capacity)
+        self.trajectories = torch.zeros((capacity, n_dim), device=device)
+        self.policy_trajectories = torch.zeros((capacity, policy_input_dim), device=device)
+        self.actions = torch.zeros((capacity, n_dim), device=device)
 
     def add(self, trajectories, policy_trajectories, actions, log_rewards):
         batch_size = trajectories.shape[0]
@@ -246,12 +246,12 @@ class TrajectoryBuffer(RewardBuffer):
 
         return terminating_states, log_rewards
     
-    def biased_sample(self, batch_size):
+    def biased_sample(self, batch_size, env):
         # Get a fraction alpha of the trajectories from the beta fraction of trajectories with 
         # highest rewards and a fraction 1 - alpha of trajectories from the remaining.
 
         indices = self._get_biased_sample_indices(batch_size)
-        return self._get_batch(indices)
+        return self._get_batch(env, indices)
     
     def biased_sample_terminating_states(self, batch_size):
         indices = self._get_biased_sample_indices(batch_size)
@@ -259,13 +259,13 @@ class TrajectoryBuffer(RewardBuffer):
 
         return terminating_states, log_rewards
     
-    def _get_batch(self, indices):
+    def _get_batch(self, env, indices):
         trajectories = self.trajectories[indices]
         policy_trajectories = self.policy_trajectories[indices]
         actions = self.actions[indices]
         log_rewards = self.log_rewards[indices]
 
-        return Batch(self.env, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
+        return Batch(env, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
     
     def _get_terminating_states(self, indices):
         terminating_states = self.trajectories[indices][:, -1, :-1]

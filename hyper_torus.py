@@ -11,25 +11,26 @@ from utils.common import set_float_precision
 
 
 class HyperTorus:
-    def __init__(self, proxy, device, n_dim: int, n_comp: int, traj_length: int, encoding_multiplier: int = 5, float_precision=32, vonmises_min_concentration=1e-3):
+    def __init__(self, proxy, device, n_dim: int, float_precision, config):
+        self.device = device
+        self.float = set_float_precision(float_precision)
+        
         self.proxy = proxy
 
         self.n_dim = n_dim
-        self.n_comp = n_comp
-        self.traj_length = traj_length
-        self.encoding_multiplier = encoding_multiplier
+        self.n_comp = config.env.n_comp
+        self.traj_length = config.env.traj_length
+        self.encoding_multiplier = config.env.encoding_multiplier
 
         self.policy_input_dim = self.n_dim * self.encoding_multiplier * 2 + 1
         self.policy_output_dim = self.n_dim * self.n_comp * 3
 
-        self.source_angles = torch.zeros(self.n_dim)
-        self.source = torch.zeros(self.n_dim + 1)
+        self.source_angles = torch.zeros(self.n_dim, device=self.device)
+        self.source = torch.zeros(self.n_dim + 1, device=self.device)
         self.state = self.source
 
-        self.device = device
-        self.float = set_float_precision(float_precision)
-
-        self.vonmises_min_concentration = vonmises_min_concentration
+        self.vonmises_min_concentration = config.env.vonmises_min_concentration
+        self.config = config
 
         print("HyperTorus initialised")
         print(f"n_dim: {self.n_dim}")
@@ -37,22 +38,21 @@ class HyperTorus:
         print(f"traj_length: {self.traj_length}")
         print(f"encoding_multiplier: {self.encoding_multiplier}")
     
-    # TODO: possibly clean up these two functions below
     def get_mixture_distribution(self, policy_outputs: TensorType["batch_size", "policy_output_dim"]):
         batch_size, output_size = policy_outputs.shape
         
         # Initialise VonMises mixture distribution:
         # --> Compute mixture weights
-        indices = torch.arange(0, output_size // 3)
+        indices = torch.arange(0, output_size // 3, device=self.device)
         mix_logits = torch.index_select(policy_outputs, dim=1, index=indices).reshape(-1, self.n_dim, self.n_comp)
         mixture_probs = Categorical(logits=mix_logits)
 
         # --> Compute VonMises means
-        indices = torch.arange(output_size // 3, 2 * output_size // 3)
+        indices = torch.arange(output_size // 3, 2 * output_size // 3, device=self.device)
         means = torch.index_select(policy_outputs, dim=1, index=indices).reshape(-1, self.n_dim, self.n_comp)
 
         # --> Compute VonMises concentrations
-        indices = torch.arange(2 * output_size // 3, output_size)
+        indices = torch.arange(2 * output_size // 3, output_size, device=self.device)
         concentrations = torch.index_select(policy_outputs, dim=1, index=indices).reshape(-1, self.n_dim, self.n_comp)
 
         # --> Initialise distribution
@@ -66,16 +66,16 @@ class HyperTorus:
         
         # Initialise VonMises mixture distribution:
         # --> Compute mixture weights
-        indices = torch.arange(0, output_size // 3)
+        indices = torch.arange(0, output_size // 3, device=self.device)
         mix_logits = torch.index_select(traj_policy_outputs, dim=2, index=indices).reshape(-1, self.traj_length, self.n_dim, self.n_comp)
         mixture_probs = Categorical(logits=mix_logits)
 
         # --> Compute VonMises means
-        indices = torch.arange(output_size // 3, 2 * output_size // 3)
+        indices = torch.arange(output_size // 3, 2 * output_size // 3, device=self.device)
         means = torch.index_select(traj_policy_outputs, dim=2, index=indices).reshape(-1, self.traj_length, self.n_dim, self.n_comp)
 
         # --> Compute VonMises concentrations
-        indices = torch.arange(2 * output_size // 3, output_size)
+        indices = torch.arange(2 * output_size // 3, output_size, device=self.device)
         concentrations = torch.index_select(traj_policy_outputs, dim=2, index=indices).reshape(-1, self.traj_length, self.n_dim, self.n_comp)
 
         # --> Initialise distribution
@@ -151,7 +151,11 @@ class HyperTorus:
     ) -> TensorType["batch_size"]:
         # Ignore the last policy output because it is not used
         if backwards:
-            mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, 1:, :])
+            if self.config.backward_policy.uniform:
+                logprobs = torch.ones(actions.shape[0], device=self.device) * -np.log(2 * np.pi)
+                return logprobs
+            else:
+                mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, 1:, :])
         else:
             mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, :-1, :])
         logprobs = mixture_distribution.log_prob(actions)

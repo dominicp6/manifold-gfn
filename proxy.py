@@ -15,13 +15,11 @@ class Proxy(ABC):
     Generic proxy class
     """
 
-    def __init__(self, device, float_precision, higher_is_better=False, **kwargs):
+    def __init__(self, device, float_precision):
         # Device
         self.device = set_device(device)
         # Float precision
         self.float = set_float_precision(float_precision)
-        # Reward2Proxy multiplicative factor (1 or -1)
-        self.higher_is_better = higher_is_better
 
     def setup(self, env):
         pass
@@ -37,30 +35,14 @@ class Proxy(ABC):
         """
         pass
 
-    def infer_on_train_set(self):
-        """
-        Implement this method in specific proxies.
-        It should return the ground-truth and proxy values on the proxy's training set.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement `infer_on_train_set`."
-        )
-
 
 class MoleculeEnergyBase(Proxy, ABC):
-    def __init__(
-        self,
-        batch_size: Optional[int] = 128,
-        # TODO: change back to 10000 after debugging
-        n_samples: int = 10000,
-        normalize: bool = True,
-        remove_outliers: bool = True,
-        clamp: bool = True,
-        skip_setup: bool = False,
-        max_energy: Optional[float] = None,
-        min_energy: Optional[float] = None,
-        **kwargs,
-    ):
+    def __init__(self, device, float_precision, config):
+        super().__init__(device=device, float_precision=float_precision)
+
+        if config.remove_outliers and not config.clamp:
+            warnings.warn("If outliers are removed it's recommended to also clamp the values.")
+
         """
         Parameters
         ----------
@@ -71,7 +53,7 @@ class MoleculeEnergyBase(Proxy, ABC):
         n_samples : int
             Number of samples that will be used to estimate minimum and maximum energy.
 
-        normalize : bool
+        normalise : bool
             Whether to truncate the energies to a (0, 1) range (estimated based on
             sample conformers).
 
@@ -82,21 +64,14 @@ class MoleculeEnergyBase(Proxy, ABC):
         clamp : bool
             Whether to clamp the energies to the estimated min and max values.
         """
-        super().__init__(**kwargs)
-
-        if remove_outliers and not clamp:
-            warnings.warn(
-                "If outliers are removed it's recommended to also clamp the values."
-            )
-
-        self.batch_size = batch_size
-        self.n_samples = n_samples
-        self.normalize = normalize
-        self.remove_outliers = remove_outliers
-        self.clamp = clamp
-        self.max_energy = max_energy
-        self.min_energy = min_energy
-        self.skip_setup = skip_setup
+        self.n_samples = config.n_samples
+        self.normalise = config.normalise
+        self.remove_outliers = config.remove_outliers
+        self.clamp = config.clamp
+        self.max_energy = config.max_energy
+        self.min_energy = config.min_energy
+        self.skip_setup = config.skip_setup
+        self.max_batch_size = config.max_batch_size
 
     @abstractmethod
     def compute_energies(self, states: Tensor, env) -> Tensor:
@@ -110,7 +85,7 @@ class MoleculeEnergyBase(Proxy, ABC):
 
         energies = energies - self.max_energy
 
-        if self.normalize:
+        if self.normalise:
             energies = energies / (self.max_energy - self.min_energy)
 
         return energies
@@ -128,6 +103,9 @@ class MoleculeEnergyBase(Proxy, ABC):
             if self.remove_outliers:
                 self.max_energy = np.quantile(energies, 0.99)
                 self.min_energy = np.quantile(energies, 0.01)
+            
+            print(f"Estimated min energy: {self.min_energy}")
+            print(f"Estimated max energy: {self.max_energy}")
 
 
 TORCHANI_MODELS = {
@@ -140,12 +118,9 @@ TORCHANI_MODELS = {
 class TorchANIMoleculeEnergy(MoleculeEnergyBase):
     def __init__(
         self,
-        model: str = "ANI2x",
-        batch_size: Optional[int] = 128,
-        n_samples: int = 10000,
-        normalize: bool = True,
-        skip_setup: bool = False,
-        **kwargs,
+        device,
+        float_precision,
+        config,
     ):
         """
         Parameters
@@ -153,52 +128,57 @@ class TorchANIMoleculeEnergy(MoleculeEnergyBase):
         model : str
             The name of the pretrained model to be used for prediction.
 
-        batch_size : int
-            Batch size for TorchANI. If none, will process all states as a single batch.
-
         normalize : bool
             Whether to truncate the energies to a (0, 1) range (estimated based on
             sample conformers).
         """
-        super().__init__(batch_size=batch_size, n_samples=n_samples, normalize=normalize, skip_setup=skip_setup, **kwargs)
+        super().__init__(device=device, float_precision=float_precision, config=config)
 
-        if TORCHANI_MODELS.get(model) is None:
+        if TORCHANI_MODELS.get(config.model) is None:
             raise ValueError(
-                f'Tried to use model "{model}", '
+                f'Tried to use model "{config.model}", '
                 f"but only {set(TORCHANI_MODELS.keys())} are available."
             )
 
-        self.model = TORCHANI_MODELS[model](periodic_table_index=True, model_index=None).to(self.device)
+        self.model = TORCHANI_MODELS[config.model](periodic_table_index=True, model_index=None).to(self.device)
 
     @torch.no_grad()
-    def compute_energies(self, atomic_numbers, conformations_positions) -> Tensor:
+    def compute_energies(self, atomic_numbers, conformations_positions) -> torch.Tensor:
         """
         Compute the energies of a batch of molecular conformations using the ANI2X model.
 
         Args:
-            atomic_numbers (torch.Tensor): 1D tensor containing atomic numbers for the molecule (shape: [N_atoms]).
+            atomic_numbers (torch.Tensor): 2D tensor containing atomic numbers for the molecule (shape: [batch_size, N_atoms]).
             conformations_positions (torch.Tensor): 3D tensor of shape [batch_size, N_atoms, 3] containing xyz positions for each conformation.
-            model (torchani.models.Model): ANI2X model.
 
         Returns:
             torch.Tensor: Energies of the batch of molecular conformations as a 1D tensor (shape: [batch_size]).
         """
         # Validate input shapes
         assert conformations_positions.ndim == 3, "conformations_positions must be a 3D tensor [batch_size, N_atoms, 3]"
-        assert atomic_numbers.ndim == 2, "atomic_numbers must be a 1D tensor [batch_size, N_atoms]"
+        assert atomic_numbers.ndim == 2, "atomic_numbers must be a 2D tensor [batch_size, N_atoms]"
         assert atomic_numbers.shape[:2] == conformations_positions.shape[:2], \
             "Mismatch between number of atoms in atomic_numbers and conformations_positions"
-        
+
         batch_size = conformations_positions.shape[0]
         energies = torch.empty(batch_size, dtype=torch.float32)
-        energies = self.model((atomic_numbers, conformations_positions)).energies.float()  
-        
+
+        if batch_size > self.max_batch_size:
+            # Process in blocks
+            for start in range(0, batch_size, self.max_batch_size):
+                end = min(start + self.max_batch_size, batch_size)
+                block_atomic_numbers = atomic_numbers[start:end]
+                block_positions = conformations_positions[start:end]
+                energies[start:end] = self.model((block_atomic_numbers, block_positions)).energies.float()
+        else:
+            # Single batch
+            energies = self.model((atomic_numbers, conformations_positions)).energies.float()
+
         return energies
 
     def __deepcopy__(self, memo):
         cls = self.__class__
         new_obj = cls.__new__(cls)
-        new_obj.batch_size = self.batch_size
         new_obj.n_samples = self.n_samples
         new_obj.max_energy = self.max_energy
         new_obj.min = self.min

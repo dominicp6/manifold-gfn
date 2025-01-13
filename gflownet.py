@@ -1,11 +1,14 @@
 """
 GFlowNet
 """
+import os
+from datetime import datetime
 from typing import Optional
 from copy import copy
 from itertools import chain
 
 import wandb
+import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -14,37 +17,53 @@ from batch import Batch
 from buffer import GeneralisedRewardBuffer
 from utils.common import set_device
 
+def kl_divergence(p, q):
+    return np.sum(p * np.log(p / q))
+
 class GFlowNet:
     def __init__(
         self,
+        device,
         env,
         forward_policy,
         backward_policy,
-        optimizer_config,
-        device,
-        batch_size,
-        regular_capacity = 1000,
-        priority_capacity = 500,
-        priority_ratio = 0.5,
+        config,
+        logging_dir: Optional[str] = None
     ):
         self.device = set_device(device)
+        self.config = config
         self.env = env
         self.traj_length = self.env.traj_length
-        self.batch_size = batch_size
+        self.batch_size = config.gflownet.batch_size
+        self.opt_config = config.optimizer_config
+        self.it = 0
 
         # Define logZ as the SUM of the values in this tensor. Dimension > 1 only to accelerate learning.
-        self.logZ = nn.Parameter(optimizer_config.initial_z_scaling * torch.ones(optimizer_config.z_dim) / optimizer_config.z_dim) 
+        self.logZ = nn.Parameter(self.opt_config.initial_z_scaling * torch.ones(self.opt_config.z_dim) / self.opt_config.z_dim) 
 
         # Buffers
-        self.buffer = GeneralisedRewardBuffer(self.env, self.device, regular_capacity, priority_capacity, priority_ratio)
+        self.buffer = GeneralisedRewardBuffer(self.env.n_dim, self.device, config.gflownet.regular_capacity, config.gflownet.priority_capacity, config.gflownet.priority_ratio)
 
         # Policy models
         self.forward_policy = forward_policy
         self.backward_policy = backward_policy
        
         # Optimizer
-        self.opt_config = optimizer_config
         self._init_optimizer()
+
+        # Logging
+        self.logger_config = config.logging
+        if logging_dir is not None:
+            assert self.config.logging.checkpoints, "Checkpoints must be enabled to use a custom logging directory."
+            self.logging_dir = logging_dir
+            # Check that the directory exists
+            if not os.path.exists(self.logging_dir):
+                raise ValueError(f"Logging directory {self.logging_dir} does not exist.")
+        else:
+            if self.config.logging.checkpoints:
+                date_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+                self.logging_dir = f"{config.logging.log_directory}/{date_time}"
+                os.makedirs(self.logging_dir)
 
     def parameters(self):
         return list(self.forward_policy.model.parameters()) + list(self.backward_policy.model.parameters())
@@ -66,7 +85,10 @@ class GFlowNet:
         self.lr_scheduler = lr_scheduler
         
     def parameters(self):
-        return chain(self.forward_policy.model.parameters(), self.backward_policy.model.parameters())
+        if not self.config.backward_policy.uniform:
+            return chain(self.forward_policy.model.parameters(), self.backward_policy.model.parameters())
+        else:
+            return self.forward_policy.model.parameters()
     
     def optimization_step(self, loss):
         loss.backward()
@@ -127,7 +149,7 @@ class GFlowNet:
         on_policy_batch.compute_rewards()
 
         # Sample a replay buffer batch if the buffer is not empty
-        if self.buffer.size > 0:
+        if self.buffer.size > 0 and n_replay > 0:
             terminal_states, log_rewards = self.buffer.sample(n_replay)
             trajectories, policy_trajectories, actions = self.backward_sample_trajectories(terminal_states)
             replay_buffer_batch = Batch(env=self.env, device=self.device, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
@@ -166,11 +188,111 @@ class GFlowNet:
     def train(self, n_train_steps):
         pbar = tqdm(range(1, n_train_steps + 1))
         for it in pbar:
-            batch = self.sample_batch(n_onpolicy=self.batch_size["forward"], n_replay=self.batch_size["replay"])
+            self.it += 1
+            batch = self.sample_batch(n_onpolicy=self.batch_size.forward, n_replay=self.batch_size.replay)
             for opt_step in range(self.opt_config.steps_per_batch):
                 loss = self.trajectorybalance_loss(batch) 
                 self.optimization_step(loss)
-            wandb.log({"loss": loss.item()})
-
             self.buffer.add(batch)
+
+            # Logging
+            wandb.log({"loss": loss.item()})
+            pbar.set_description(f"Loss: {loss.item():.3f}")
+
+            if it % self.logger_config.log_interval == 0:
+                pbar.set_description(f"Loss: {loss.item():.3f} [Evaluating metrics]")
+                l1_divergence, kl_divergence, jsd_divergence = self.compute_metrics()
+                wandb.log({"l1_divergence": l1_divergence, "kl_divergence": kl_divergence, "jsd_divergence": jsd_divergence})
+
+            if it % self.logger_config.checkpoint_interval == 0 and self.logger_config.checkpoints:
+                self.save_checkpoint(pbar, loss)
+
+    def save_checkpoint(self, pbar, loss):
+        pbar.set_description(f"Loss: {loss.item():.3f} [Saving checkpoint]")
+        fwd_pol_state_dict = self.forward_policy.model.state_dict()
+        # Append "model." to the keys of the forward policy state dict
+        fwd_pol_state_dict = {f"model.{k}": v for k, v in fwd_pol_state_dict.items()}
+        bkwd_pol_state_dict = self.backward_policy.model.state_dict() if not self.config.backward_policy.uniform else None
+        # Append "model." to the keys of the backward policy state dict
+        if bkwd_pol_state_dict is not None:
+            bkwd_pol_state_dict = {f"model.{k}": v for k, v in bkwd_pol_state_dict.items()}
+        checkpoint = {
+            "forward_policy": fwd_pol_state_dict,
+            "backward_policy": bkwd_pol_state_dict,
+            "optimizer": self.opt.state_dict(),
+            "lr_scheduler": self.lr_scheduler.state_dict(),
+            "logZ": self.logZ,
+            "buffer": self.buffer,
+            "it": self.it,
+            "config": self.config.to_dict(),
+        }
+        torch.save(checkpoint, f"{self.logging_dir}/checkpoint.pt")
+        self.update_status_file()   
+
+    def update_status_file(self):
+        with open(f"{self.logging_dir}/status.txt", "w") as f:
+            f.write(f"Checkpoint saved at step {self.it}\n")
+
+    def compute_metrics(self):
+        """
+        Computes metrics by sampling trajectories from the forward policy.
+        """
+
+        # TODO: need to correct this to factor in the correct Boltzmann weighting giving the units from torchANI
+
+        n_samples = self.logger_config.n_uniform_samples
+
+        # Compute marginal histograms based on random samples 
+        angles_uniform = 2 * np.pi * torch.rand((n_samples, self.env.n_dim), device=self.device) 
+        random_sampled_conformers = self.env.statebatch2conformerbatch(angles_uniform)
+        conformer_energies = self.env.proxy(*random_sampled_conformers).cpu().numpy()
+
+        # Estimate the Boltzmann density for each bin of marginal angles using the random samples
+        beta = 1.0
+        boltzmann_density = np.exp( - conformer_energies * beta)
+
+        n_bins_per_dimension = self.logger_config.num_bins
+        histograms = []
+
+        for dim in range(self.env.n_dim):
+            # Extract the angles for the current dimension
+            angles = angles_uniform[:, dim].cpu().numpy()
+
+            # Compute the histogram and weights for the Boltzmann density
+            hist, _ = np.histogram(angles, bins=n_bins_per_dimension, range=(0, 2 * np.pi), weights=boltzmann_density)
+            norm_counts, _ = np.histogram(angles, bins=n_bins_per_dimension, range=(0, 2 * np.pi))
+            average_density = np.divide(hist, norm_counts, out=np.zeros_like(hist), where=norm_counts > 0)
+            normalised_density = np.divide(hist, np.sum(hist))
+
+            # Store results
+            histograms.append(normalised_density)
+
+        # Compute marginal histograms based on samples from the forward policy
+        batch = self.sample_batch(n_onpolicy=self.logger_config.n_onpolicy_samples, n_replay=0)
+        terminating_states = batch.get_terminating_states()
+        conformer_energies = self.env.proxy(*self.env.statebatch2conformerbatch(terminating_states)).cpu().numpy()
+
+        # Estimate the Boltzmann density for each bin of marginal angles using the samples from the forward policy
+        boltzmann_density = np.exp( - conformer_energies * beta)
+
+        histograms_policy = []
+        for dim in range(self.env.n_dim):
+            angles = terminating_states[:, dim].cpu().numpy()
+            hist, _ = np.histogram(angles, bins=n_bins_per_dimension, range=(0, 2 * np.pi), weights=boltzmann_density)
+            average_density = np.divide(hist, norm_counts, out=np.zeros_like(hist), where=norm_counts > 0)
+            normalised_density = np.divide(hist, np.sum(hist))
+
+            histograms_policy.append(normalised_density)
+
+        # Compute the average L1, KL and JSD divergences between the uniform-estimated Boltzmann densities and the policy-estimated Boltzmann densities
+        l1_divergences = [np.mean(np.abs(histograms[dim] - histograms_policy[dim])) for dim in range(self.env.n_dim)]
+
+        kl_divergences = [kl_divergence(histograms[dim], histograms_policy[dim]) for dim in range(self.env.n_dim)]
+        
+        if any(np.isinf(kl_divergences)):
+            raise ValueError("KL divergence is infinite when computing the metric. This is likely due to a lack of samples during evaluation. Increase the number of samples and try again.")
+
+        jsd_divergences = [0.5 * kl_divergence(histograms[dim], 0.5 * (histograms[dim] + histograms_policy[dim])) + 0.5 * kl_divergence(histograms_policy[dim], 0.5 * (histograms[dim] + histograms_policy[dim])) for dim in range(self.env.n_dim)]
+
+        return np.mean(l1_divergences), np.mean(kl_divergences), np.mean(jsd_divergences) 
     

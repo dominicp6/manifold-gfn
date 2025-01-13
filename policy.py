@@ -1,10 +1,12 @@
+import numpy as np
+
+import torch
 from torch import nn
 
 from utils.common import set_device, set_float_precision
 
-# TODO: figure out the shared weights mechanism
 
-class Policy:
+class MLP_Policy(nn.Module):
     def __init__(self, 
                  env, 
                  device, 
@@ -13,6 +15,7 @@ class Policy:
                  n_layers,
                  shared_weights=False,
                  base=None):
+        super(MLP_Policy, self).__init__()
         # Device and float precision
         self.device = set_device(device)
         self.float = set_float_precision(float_precision)
@@ -75,3 +78,16 @@ class Policy:
             raise ValueError(
                 "Base Model must be provided when shared_weights is set to True"
             )
+        
+
+class Uniform_Policy:
+    def __init__(self, env, device, float_precision):
+        self.device = set_device(device)
+        self.float = set_float_precision(float_precision)
+        self.output_dim = env.policy_output_dim
+
+    def __call__(self, states):
+        return torch.rand(states.shape[0], self.output_dim, device=self.device) * 2 * np.pi
+
+    def sample(self, states):
+        return self(states)

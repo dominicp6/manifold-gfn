@@ -34,20 +34,14 @@ class ConformerEnvironment(HyperTorus):
 
     def __init__(
         self,
-        proxy,
+        device,
+        float_precision,
         dataset: SMILESDataset,
-        single_molecule:bool = True,
-        molecule_id:int = 0,
-        remove_hydrogens: bool = True,
-        n_comp: int = 3,
-        traj_length: int = 5,
-        encoding_multiplier: int = 5,
-        vonmises_min_concentration: float = 1e-3,
-        float_precision: int = 32,
-        device: str = "cpu"
+        proxy,
+        config,
     ):  
-        if single_molecule:
-            self.smiles = dataset.molecules[molecule_id]
+        if config.env.single_molecule:
+            self.smiles = dataset.molecules[config.env.molecule_id]
             self.atom_positions = get_positions(self.smiles)
             self.torsion_angles = get_torsion_angles(self.smiles)
             self.set_conformer()
@@ -63,14 +57,14 @@ class ConformerEnvironment(HyperTorus):
                 self.graph.edata["rotatable_edges"][i] = False
 
         # We remove hydrogen atoms since they are not considered in the torsion angles and are thus not part of the action space
-        self.remove_hydrogens = remove_hydrogens
+        self.remove_hydrogens = config.env.remove_hydrogens
         self.hydrogens = torch.where(self.graph.ndata["atom_features"][:, 0] == 1)[0]
         self.non_hydrogens = torch.where(self.graph.ndata["atom_features"][:, 0] != 1)[0]
-        if remove_hydrogens:
+        if config.env.remove_hydrogens:
             self.graph = dgl.remove_nodes(self.graph, self.hydrogens)
 
         self.n_dim = len(self.conformer.freely_rotatable_tas)
-        super().__init__(proxy=proxy, device=device, vonmises_min_concentration=vonmises_min_concentration, n_dim=self.n_dim, n_comp=n_comp, traj_length=traj_length, encoding_multiplier=encoding_multiplier, float_precision=float_precision)
+        super().__init__(proxy=proxy, device=device, n_dim=self.n_dim, float_precision=float_precision, config=config)
         self.sync_conformer_with_state()
 
         # Set up proxy
@@ -106,8 +100,8 @@ class ConformerEnvironment(HyperTorus):
         - conformers_coords: Tensor with dimensionality (batch_size, N_atoms, 3), which encodes atomic positions for the batch of states.
         """
         batch_size = states.shape[0]
-        atomic_numbers = torch.zeros((batch_size, self.conformer.get_n_atoms()), dtype=torch.int32)
-        conformers_coords = torch.zeros((batch_size, self.conformer.get_n_atoms(), 3))
+        atomic_numbers = torch.zeros((batch_size, self.conformer.get_n_atoms()), dtype=torch.int32, device=self.device)
+        conformers_coords = torch.zeros((batch_size, self.conformer.get_n_atoms(), 3), device=self.device)
         for conf_idx in range(states.shape[0]):
             conf = self.sync_conformer_with_state(states[conf_idx])
             conformers_coords[conf_idx] = torch.tensor(conf.get_atom_positions()) 
