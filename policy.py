@@ -30,7 +30,7 @@ class MLP_Policy(nn.Module):
         self.instantiate()
 
     def instantiate(self):
-        self.model = self.make_mlp(nn.LeakyReLU()).to(self.device)
+        self.model = self.make_mlp(nn.LeakyReLU()).to(self.device, dtype=self.float)
 
     def __call__(self, states):
         return self.model(states)
@@ -54,7 +54,6 @@ class MLP_Policy(nn.Module):
                     self.base.model[-1].in_features, self.base.model[-1].out_features
                 ),
             )
-            return mlp
         elif self.shared_weights == False:
             layers_dim = (
                 [self.state_dim] + [self.n_hid] * self.n_layers + [(self.output_dim)]
@@ -73,11 +72,10 @@ class MLP_Policy(nn.Module):
                     )
                 )
             )
-            return mlp
         else:
-            raise ValueError(
-                "Base Model must be provided when shared_weights is set to True"
-            )
+            raise ValueError("Base Model must be provided when shared_weights is set to True")
+        
+        return mlp.to(dtype=self.float)
         
 
 class Uniform_Policy:
@@ -87,7 +85,7 @@ class Uniform_Policy:
         self.output_dim = env.policy_output_dim
 
     def __call__(self, states):
-        return torch.rand(states.shape[0], self.output_dim, device=self.device) * 2 * np.pi
+        return torch.rand(states.shape[0], self.output_dim, device=self.device, dtype=self.float) * 2 * np.pi
 
     def sample(self, states):
         return self(states)

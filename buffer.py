@@ -7,11 +7,12 @@ from batch import Batch
 
 class GeneralisedRewardBuffer():
 
-    def __init__(self, n_dim, device, capacity: int, priority_capacity: int, priority_ratio: float):
+    def __init__(self, n_dim, device, float_type, capacity: int, priority_capacity: int, priority_ratio: float):
         self.device = device
         self.n_dim = n_dim
-        self.cyclic_buffer = RewardBuffer(n_dim, device, capacity)
-        self.priority_buffer = RewardBuffer(n_dim, device, priority_capacity)
+        self.float = float_type
+        self.cyclic_buffer = RewardBuffer(n_dim, device, float_type, capacity)
+        self.priority_buffer = RewardBuffer(n_dim, device, float_type, priority_capacity)
         self.priority_ratio = priority_ratio
         self.size = 0
 
@@ -21,8 +22,8 @@ class GeneralisedRewardBuffer():
         self.size = self.cyclic_buffer.size + self.priority_buffer.size
 
     def sample(self, batch_size):
-        terminal_states = torch.zeros((batch_size, self.n_dim), device=self.device)
-        log_rewards = torch.zeros((batch_size), device=self.device)
+        terminal_states = torch.zeros((batch_size, self.n_dim), device=self.device, dtype=self.float)
+        log_rewards = torch.zeros((batch_size), device=self.device, dtype=self.float)
 
         n_priority = int(self.priority_ratio * batch_size)
         n_cyclic = batch_size - n_priority
@@ -57,16 +58,17 @@ class GeneralisedRewardBuffer():
 
 class RewardBuffer():
 
-    def __init__(self, n_dim, device, capacity: int):
+    def __init__(self, n_dim, device, float_type, capacity: int):
         self.device = device
+        self.float = float_type
         self.capacity = capacity
         self.current_index = 0
         self.size = 0
         self.full = False
         self.n_dim = n_dim
 
-        self.terminating_states = torch.zeros((capacity, self.n_dim), device=device)
-        self.log_rewards = torch.full((capacity,), -torch.inf, dtype=torch.float32, device=device)
+        self.terminating_states = torch.zeros((capacity, self.n_dim), device=device, dtype=self.float)
+        self.log_rewards = torch.full((capacity,), -torch.inf, device=device, dtype=self.float)
 
     def add(self, terminating_states, log_rewards):
         batch_size = terminating_states.shape[0]
@@ -187,11 +189,11 @@ class RewardBuffer():
 
 class TrajectoryBuffer(RewardBuffer):
 
-    def __init__(self, n_dim, policy_input_dim, device, capacity: int):
-        super().__init__(n_dim, device, capacity)
-        self.trajectories = torch.zeros((capacity, n_dim), device=device)
-        self.policy_trajectories = torch.zeros((capacity, policy_input_dim), device=device)
-        self.actions = torch.zeros((capacity, n_dim), device=device)
+    def __init__(self, n_dim, policy_input_dim, device, float_type, capacity: int):
+        super().__init__(n_dim, device, float_type, capacity)
+        self.trajectories = torch.zeros((capacity, n_dim), device=device, dtype=float_type)
+        self.policy_trajectories = torch.zeros((capacity, policy_input_dim), device=device, dtype=float_type)
+        self.actions = torch.zeros((capacity, n_dim), device=device, dtype=float_type)
 
     def add(self, trajectories, policy_trajectories, actions, log_rewards):
         batch_size = trajectories.shape[0]

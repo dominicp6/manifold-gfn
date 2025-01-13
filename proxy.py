@@ -134,6 +134,8 @@ class TorchANIMoleculeEnergy(MoleculeEnergyBase):
         """
         super().__init__(device=device, float_precision=float_precision, config=config)
 
+        # TODO: use float precision correctly here
+
         if TORCHANI_MODELS.get(config.model) is None:
             raise ValueError(
                 f'Tried to use model "{config.model}", '

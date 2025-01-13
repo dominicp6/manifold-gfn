@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from batch import Batch
 from buffer import GeneralisedRewardBuffer
-from utils.common import set_device
+from utils.common import set_device, set_float_precision
 
 def kl_divergence(p, q):
     return np.sum(p * np.log(p / q))
@@ -24,6 +24,7 @@ class GFlowNet:
     def __init__(
         self,
         device,
+        float_precision,
         env,
         forward_policy,
         backward_policy,
@@ -31,18 +32,21 @@ class GFlowNet:
         logging_dir: Optional[str] = None
     ):
         self.device = set_device(device)
+        self.float = set_float_precision(float_precision)
         self.config = config
         self.env = env
         self.traj_length = self.env.traj_length
         self.batch_size = config.gflownet.batch_size
         self.opt_config = config.optimizer_config
         self.it = 0
+        boltzmann_constant = 3.1668114e-6 # hartree/K
+        self.beta = 1.0 / (boltzmann_constant * self.config.general.T) # hartree^-1 
 
         # Define logZ as the SUM of the values in this tensor. Dimension > 1 only to accelerate learning.
         self.logZ = nn.Parameter(self.opt_config.initial_z_scaling * torch.ones(self.opt_config.z_dim) / self.opt_config.z_dim) 
 
         # Buffers
-        self.buffer = GeneralisedRewardBuffer(self.env.n_dim, self.device, config.gflownet.regular_capacity, config.gflownet.priority_capacity, config.gflownet.priority_ratio)
+        self.buffer = GeneralisedRewardBuffer(self.env.n_dim, self.device, self.float, config.gflownet.regular_capacity, config.gflownet.priority_capacity, config.gflownet.priority_ratio)
 
         # Policy models
         self.forward_policy = forward_policy
@@ -114,10 +118,10 @@ class GFlowNet:
     
     def backward_sample_trajectories(self, terminal_states):
         batch_size = terminal_states.shape[0]
-        actions = torch.zeros((batch_size, self.traj_length, self.env.n_dim), device=self.device) 
-        trajectories = torch.zeros((batch_size, self.traj_length + 1, self.env.n_dim + 1), device=self.device) 
-        policy_trajectories = torch.zeros((batch_size, self.traj_length + 1, self.env.policy_input_dim), device=self.device)
-        trajectories[:, -1, :] = torch.cat([terminal_states, self.traj_length * torch.ones(batch_size, 1, device=self.device)], dim=1) 
+        actions = torch.zeros((batch_size, self.traj_length, self.env.n_dim), device=self.device, dtype=self.float) 
+        trajectories = torch.zeros((batch_size, self.traj_length + 1, self.env.n_dim + 1), device=self.device, dtype=self.float) 
+        policy_trajectories = torch.zeros((batch_size, self.traj_length + 1, self.env.policy_input_dim), device=self.device, dtype=self.float)
+        trajectories[:, -1, :] = torch.cat([terminal_states, self.traj_length * torch.ones(batch_size, 1, device=self.device, dtype=self.float)], dim=1) 
         
         for t in range(self.traj_length - 1, -1, -1):
             # t ranges from (self.trajectory_length - 1) to (0)
@@ -134,10 +138,10 @@ class GFlowNet:
         """
 
         # Initialise an on-policy batch 
-        actions = torch.zeros((n_onpolicy, self.traj_length, self.env.n_dim), device=self.device) 
-        trajectories = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.n_dim + 1), device=self.device) 
-        policy_trajectories = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.policy_input_dim), device=self.device)
-        log_rewards = torch.zeros(n_onpolicy, device=self.device)
+        actions = torch.zeros((n_onpolicy, self.traj_length, self.env.n_dim), device=self.device, dtype=self.float) 
+        trajectories = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.n_dim + 1), device=self.device, dtype=self.float) 
+        policy_trajectories = torch.zeros((n_onpolicy, self.traj_length + 1, self.env.policy_input_dim), device=self.device, dtype=self.float)
+        log_rewards = torch.zeros(n_onpolicy, device=self.device, dtype=self.float)
 
         trajectories[:, 0, :] = self.env.source
         # Generate on-policy trajectories
@@ -145,14 +149,14 @@ class GFlowNet:
             actions[:, t, :], policy_trajectories[:, t, :] = self.sample_action(trajectories[:, t, :])
             trajectories[:, t + 1, :] = self.env.step(actions[:, t, :], trajectories[:, t, :])
 
-        on_policy_batch = Batch(env=self.env, device=self.device, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions)
+        on_policy_batch = Batch(env=self.env, device=self.device, float_type=self.float, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions)
         on_policy_batch.compute_rewards()
 
         # Sample a replay buffer batch if the buffer is not empty
         if self.buffer.size > 0 and n_replay > 0:
             terminal_states, log_rewards = self.buffer.sample(n_replay)
             trajectories, policy_trajectories, actions = self.backward_sample_trajectories(terminal_states)
-            replay_buffer_batch = Batch(env=self.env, device=self.device, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
+            replay_buffer_batch = Batch(env=self.env, device=self.device, float_type=self.float, trajectories=trajectories, policy_trajectories=policy_trajectories, actions=actions, log_rewards=log_rewards)
 
             # Merge the batches
             final_batch = on_policy_batch.merge(replay_buffer_batch)
@@ -233,60 +237,55 @@ class GFlowNet:
         with open(f"{self.logging_dir}/status.txt", "w") as f:
             f.write(f"Checkpoint saved at step {self.it}\n")
 
+    def _compute_boltzman_weights(self, states):
+        conformers = self.env.statebatch2conformerbatch(states)
+        energies = self.env.proxy(*conformers).cpu().numpy()
+        
+        if self.config.proxy.normalise:
+            energies = (energies + 1) * (self.env.proxy.max_energy - self.env.proxy.min_energy) 
+        
+        boltzmann_weights = np.exp( - energies * self.beta)
+
+        return boltzmann_weights
+    
+    def _compute_free_energy_histogram(self, states, boltzmann_weights):
+        n_bins_per_dimension = self.logger_config.num_bins
+        histograms = []
+        for dim in range(self.env.n_dim):
+            # Extract the angles for the current dimension
+            dim_marginal_states = states[:, dim].cpu().numpy()
+
+            # Compute the histogram and weights for the Boltzmann density
+            hist, _ = np.histogram(dim_marginal_states, bins=n_bins_per_dimension, range=(0, 2 * np.pi), weights=boltzmann_weights)
+            norm_counts, _ = np.histogram(dim_marginal_states, bins=n_bins_per_dimension, range=(0, 2 * np.pi))
+            average_density = np.divide(hist, norm_counts, out=np.zeros_like(hist), where=norm_counts > 0)
+            normalised_density = np.divide(average_density, np.sum(average_density))
+
+            # Store results
+            histograms.append(normalised_density)
+        
+        return histograms
+
     def compute_metrics(self):
         """
         Computes metrics by sampling trajectories from the forward policy.
         """
 
-        # TODO: need to correct this to factor in the correct Boltzmann weighting giving the units from torchANI
-
         n_samples = self.logger_config.n_uniform_samples
 
         # Compute marginal histograms based on random samples 
-        angles_uniform = 2 * np.pi * torch.rand((n_samples, self.env.n_dim), device=self.device) 
-        random_sampled_conformers = self.env.statebatch2conformerbatch(angles_uniform)
-        conformer_energies = self.env.proxy(*random_sampled_conformers).cpu().numpy()
-
-        # Estimate the Boltzmann density for each bin of marginal angles using the random samples
-        beta = 1.0
-        boltzmann_density = np.exp( - conformer_energies * beta)
-
-        n_bins_per_dimension = self.logger_config.num_bins
-        histograms = []
-
-        for dim in range(self.env.n_dim):
-            # Extract the angles for the current dimension
-            angles = angles_uniform[:, dim].cpu().numpy()
-
-            # Compute the histogram and weights for the Boltzmann density
-            hist, _ = np.histogram(angles, bins=n_bins_per_dimension, range=(0, 2 * np.pi), weights=boltzmann_density)
-            norm_counts, _ = np.histogram(angles, bins=n_bins_per_dimension, range=(0, 2 * np.pi))
-            average_density = np.divide(hist, norm_counts, out=np.zeros_like(hist), where=norm_counts > 0)
-            normalised_density = np.divide(hist, np.sum(hist))
-
-            # Store results
-            histograms.append(normalised_density)
+        angles_uniform = 2 * np.pi * torch.rand((n_samples, self.env.n_dim), device=self.device, dtype=self.float) 
+        boltzmann_weights = self._compute_boltzman_weights(angles_uniform)
+        histograms = self._compute_free_energy_histogram(angles_uniform, boltzmann_weights)
 
         # Compute marginal histograms based on samples from the forward policy
         batch = self.sample_batch(n_onpolicy=self.logger_config.n_onpolicy_samples, n_replay=0)
         terminating_states = batch.get_terminating_states()
-        conformer_energies = self.env.proxy(*self.env.statebatch2conformerbatch(terminating_states)).cpu().numpy()
-
-        # Estimate the Boltzmann density for each bin of marginal angles using the samples from the forward policy
-        boltzmann_density = np.exp( - conformer_energies * beta)
-
-        histograms_policy = []
-        for dim in range(self.env.n_dim):
-            angles = terminating_states[:, dim].cpu().numpy()
-            hist, _ = np.histogram(angles, bins=n_bins_per_dimension, range=(0, 2 * np.pi), weights=boltzmann_density)
-            average_density = np.divide(hist, norm_counts, out=np.zeros_like(hist), where=norm_counts > 0)
-            normalised_density = np.divide(hist, np.sum(hist))
-
-            histograms_policy.append(normalised_density)
+        boltzmann_weights = self._compute_boltzman_weights(terminating_states)
+        histograms_policy = self._compute_free_energy_histogram(terminating_states, boltzmann_weights)
 
         # Compute the average L1, KL and JSD divergences between the uniform-estimated Boltzmann densities and the policy-estimated Boltzmann densities
         l1_divergences = [np.mean(np.abs(histograms[dim] - histograms_policy[dim])) for dim in range(self.env.n_dim)]
-
         kl_divergences = [kl_divergence(histograms[dim], histograms_policy[dim]) for dim in range(self.env.n_dim)]
         
         if any(np.isinf(kl_divergences)):

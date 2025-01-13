@@ -1,13 +1,13 @@
 from experiment import Experiment
 
-# TODO: fix evaluation metrics
-# TODO: make float_precision consistent
+# TODO: fix half precision
 
 config = {
       "general" : {
          "device": "cuda",
          "float_precision": 32,
          "path_to_data": "/home/sebidom/dom/manifold_contgfn/manifold-gfn/smiles_strings.npy",
+         "T" : 298.15,
       },
       "proxy" : {
          "model": "ANI2x",
@@ -68,8 +68,8 @@ config = {
           "log_interval": 50,
           "checkpoint_interval": 200,
           "checkpoints": True,
-          "n_uniform_samples": 1000,
-          "n_onpolicy_samples": 1000,
+          "n_uniform_samples": 10000,
+          "n_onpolicy_samples": 10000,
           "num_bins": 25,
       }
 }

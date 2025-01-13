@@ -127,8 +127,7 @@ class HyperTorus:
 
         mixture_distribution, batch_size = self.get_mixture_distribution(policy_outputs)
 
-        # Initialise a logprobs and actions tensor
-        logprobs = torch.zeros((batch_size, self.n_dim), dtype=self.float, device=self.device)
+        # Initialise an actions tensor
         actions_tensor = torch.zeros((batch_size, self.n_dim), dtype=self.float, device=self.device)    
 
         # Sample angles and evaluate logprobs
@@ -152,7 +151,7 @@ class HyperTorus:
         # Ignore the last policy output because it is not used
         if backwards:
             if self.config.backward_policy.uniform:
-                logprobs = torch.ones(actions.shape[0], device=self.device) * -np.log(2 * np.pi)
+                logprobs = torch.ones(actions.shape[0], device=self.device, dtype=self.float) * -np.log(2 * np.pi)
                 return logprobs
             else:
                 mixture_distribution, _ = self.get_traj_mixture_distribution(policy_outputs[:, 1:, :])

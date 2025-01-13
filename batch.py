@@ -15,11 +15,11 @@ class Batch:
         self,
         env,
         device: Union[str, torch.device],
+        float_type,
         trajectories: Optional[TensorType["batch_size, traj_length + 1, n_dim"]] = None,
         policy_trajectories: Optional[TensorType["batch_size, traj_length + 1, policy_state_dim"]] = None,
         actions: Optional[TensorType["batch_size, traj_length, action_dim"]] = None,
         log_rewards: Optional[TensorType["batch_size"]] = None,
-        float_type: Union[int, torch.dtype] = 32,
     ):
         self.device = set_device(device)
         self.float = set_float_precision(float_type)
