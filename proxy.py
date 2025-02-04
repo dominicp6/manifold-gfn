@@ -83,10 +83,11 @@ class MoleculeEnergyBase(Proxy, ABC):
         if self.clamp:
             energies = energies.clamp(self.min_energy, self.max_energy)
 
-        energies = energies - self.max_energy
+        energies = energies - self.min_energy
+        # energies = energies - self.max_energy
 
-        if self.normalise:
-            energies = energies / (self.max_energy - self.min_energy)
+        # if self.normalise:
+            # energies = energies / (self.max_energy - self.min_energy)
 
         return energies
 
