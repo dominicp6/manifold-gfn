@@ -17,26 +17,34 @@ class GeneralisedRewardBuffer():
         self.size = 0
 
     def add(self, batch: Batch):
-        self.cyclic_buffer.add(batch.get_terminating_states(), batch.log_rewards)
-        self.priority_buffer.priority_add(batch.get_terminating_states(), batch.log_rewards)
-        self.size = self.cyclic_buffer.size + self.priority_buffer.size
+        if batch is not None:
+            self.cyclic_buffer.add(batch.get_terminating_states(), batch.log_rewards)
+            self.priority_buffer.priority_add(batch.get_terminating_states(), batch.log_rewards)
+            self.size = self.cyclic_buffer.size + self.priority_buffer.size
 
     def sample(self, batch_size):
+        # TODO: what if priority buffer is underoccupied?
+
+        # Initialize buffers
         terminal_states = torch.zeros((batch_size, self.n_dim), device=self.device, dtype=self.float)
-        log_rewards = torch.zeros((batch_size), device=self.device, dtype=self.float)
+        log_rewards = torch.zeros(batch_size, device=self.device, dtype=self.float)
 
         n_priority = int(self.priority_ratio * batch_size)
         n_cyclic = batch_size - n_priority
 
+        # Ensure priority buffer can accommodate the requested samples
+        assert n_priority <= self.priority_buffer.size, (f"Priority buffer capacity ({self.priority_buffer.size}) is less than requested priority samples ({n_priority})")
+
         cyclic_terminal_states, cyclic_log_rewards = self.cyclic_buffer.sample(n_cyclic)
-        assert not torch.any(cyclic_log_rewards == -torch.inf), "Some cyclic log rewards are -inf"
+        assert not torch.any(cyclic_log_rewards == -torch.inf), "Cyclic log rewards contain -inf values"
+
         priority_terminal_states, priority_log_rewards = self.priority_buffer.sample(n_priority)
-        assert not torch.any(priority_log_rewards == -torch.inf), "Some priority log rewards are -inf"
+        assert not torch.any(priority_log_rewards == -torch.inf), "Priority log rewards contain -inf values"
 
         terminal_states[:n_priority, :] = priority_terminal_states
-        terminal_states[n_priority:, :] = cyclic_terminal_states
-
         log_rewards[:n_priority] = priority_log_rewards
+
+        terminal_states[n_priority:, :] = cyclic_terminal_states
         log_rewards[n_priority:] = cyclic_log_rewards
 
         return terminal_states, log_rewards
@@ -138,8 +146,21 @@ class RewardBuffer():
 
     def sample(self, batch_size):
         assert self.size > 0, "Buffer is empty"
+        if batch_size == 0:
+            return None, None
+
+        terminating_states = torch.zeros((batch_size, self.n_dim), device=self.device, dtype=self.float)
+        log_rewards = torch.zeros((batch_size), device=self.device, dtype=self.float)
+
         # TODO: consider whether this should be done on the CPU with numpy or on the GPU with torch
-        indices = np.random.choice(self.size, batch_size, replace=False)
+        try:
+            # Try sampling without replacement
+            indices = np.random.choice(self.size, batch_size, replace=False)
+        except ValueError:
+            Warning("Buffer is too small to sample without replacement a batch of size {batch_size}. Sampling with replacement instead.")
+            # If the buffer is too small, sample with replacement
+            indices = np.random.choice(self.size, self.size, replace=True)
+
         terminating_states = self.terminating_states[indices]
         log_rewards = self.log_rewards[indices]
 
@@ -174,6 +195,9 @@ class RewardBuffer():
         return indices
     
     def biased_sample(self, batch_size):
+        if batch_size == 0:
+            return None, None
+        
         indices = self._get_biased_sample_indices(batch_size)
 
         terminating_states = self.terminating_states[indices]

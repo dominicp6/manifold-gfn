@@ -53,7 +53,7 @@ class Batch:
     def compute_rewards(self):
         terminating_states = self.get_terminating_states()
         self.log_rewards = torch.zeros(len(self), dtype=self.float, device=self.device)
-        self.log_rewards = self.env.proxy(*self.env.statebatch2conformerbatch(terminating_states))
+        self.log_rewards = - self.env.beta * self.env.proxy(*self.env.statebatch2conformerbatch(terminating_states))
         self.rewards_available = True
 
     def compute_forward_log_probs(self, gfn):
