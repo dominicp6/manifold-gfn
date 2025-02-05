@@ -41,6 +41,44 @@ def remove_duplicate_tas(tas_list):
             considered.append((begin, end))
     return clean_tas
 
+def find_backbone_dihedrals(smiles):
+    """
+    Identify backbone dihedrals (phi and psi) in a peptide molecule.
+
+    Parameters:
+    smiles : str
+        The SMILES string representing a peptide molecule.
+
+    Returns:
+    dict: A dictionary with keys 'phi' and 'psi' containing tuples of atom indices for these angles.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    mol = Chem.AddHs(mol)
+
+    # Backbone dihedral patterns
+    phi_pattern = "[C](=[O])[N]-[C@H]-[C](=[O])"
+    psi_pattern = "[N]-[C@H]-[C](=[O])-[N]"
+    omega1_pattern = "[C]-[C]-[N]-[C@H]"
+    omega2_pattern = "[C@H]-[C]-[N]-[C]"
+
+    phi_matches = mol.GetSubstructMatches(Chem.MolFromSmarts(phi_pattern))
+    psi_matches = mol.GetSubstructMatches(Chem.MolFromSmarts(psi_pattern))
+    omega1_matches = mol.GetSubstructMatches(Chem.MolFromSmarts(omega1_pattern))
+    omega2_matches = mol.GetSubstructMatches(Chem.MolFromSmarts(omega2_pattern))
+
+    # Convert to torsion angles by extracting unique adjacent atom indices
+    phi_dihedrals = [(c1, n1, ca, c2) for c1, o, n1, ca, c2, ot in phi_matches]
+    psi_dihedrals = [(n1, ca, c2, n2) for n1, ca, c2, o, n2 in psi_matches]
+    omega1_dihedrals = [(cw1, c1, n1, ca) for cw1, c1, n1, ca in omega1_matches]
+    omega2_dihedrals = [(ca, c2, n2, cw2) for ca, c2, n2, cw2 in omega2_matches]
+
+    return {
+        'phi': phi_dihedrals,
+        'psi': psi_dihedrals,
+        'omega1': omega1_dihedrals,
+        'omega2': omega2_dihedrals
+    }
+
 
 def get_rotatable_ta_list(mol):
     """
@@ -69,7 +107,7 @@ def get_rotatable_ta_list(mol):
     return torsion_angles
 
 
-def find_rotor_from_smiles(smiles):
+def get_torsion_angles(smiles):
     """
     Find unique rotatable torsion angles of a molecule. Torsion angle is given by a tuple of adjacent atoms'
     indices (atom1, atom2, atom3, atom4), where:
