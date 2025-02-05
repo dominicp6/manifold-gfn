@@ -230,12 +230,15 @@ class GFlowNet:
 
             if it % self.logger_config.log_interval == 0:
                 pbar.set_description(f"Loss: {loss.item():.3f} [Evaluating metrics]")
-                if self.env.n_dim == 2:
-                    l1_divergence, kl_divergence, jsd_divergence = self.compute_divergence_metrics(expected_density, ground_truth_density)
+                
+                if self.env.smiles == b'CC(=O)N[C@@H](C)C(=O)NC':
+                    # Currently these metrics only work for alanine dipeptide
+                    l1_divergence, kl_divergence, js_divergence = self.compute_divergence_metrics(expected_density, ground_truth_density)
                 else:
-                    l1_divergence, kl_divergence, jsd_divergence = self.estimate_divergence_metrics()
-                wandb.log({"l1_divergence_e": l1_divergence[0], "kl_divergence_e": kl_divergence[0], "jsd_divergence_e": jsd_divergence[0]})
-                wandb.log({"l1_divergence": l1_divergence[1], "kl_divergence": kl_divergence[1], "jsd_divergence": jsd_divergence[1]})
+                    l1_divergence, kl_divergence, js_divergence = self.estimate_divergence_metrics()
+                
+                wandb.log({"l1_divergence_e": l1_divergence[0], "kl_divergence_e": kl_divergence[0], "js_divergence_e": js_divergence[0]})
+                wandb.log({"l1_divergence": l1_divergence[1], "kl_divergence": kl_divergence[1], "js_divergence": js_divergence[1]})
 
             if it % self.logger_config.checkpoint_interval == 0 and self.logger_config.checkpoints:
                 self.save_checkpoint(pbar, loss)
@@ -244,48 +247,59 @@ class GFlowNet:
                 self.visualise(pbar, loss)
 
     def compute_ground_truth_density(self):
-        if self.env.n_dim != 2:
-            raise ValueError("Ground truth density can only be computed for 2D environments.")
+        if self.env.n_dim not in [2, 4] or (self.env.n_dim == 2 and self.smiles != "CC(=O)N[C@@H](C)C(=O)NC"):
+            raise ValueError("Ground truth density can only be computed for 2D or 4D environments (alanine dipeptide).")
         
         grid_size = self.config.logging.num_bins
         angles_per_dim = torch.linspace(-torch.pi, torch.pi, grid_size, device=self.device, dtype=self.float)
-
-        # Generate a regular grid by taking the Cartesian product
-        grid = torch.tensor(list(product(*[angles_per_dim] * self.env.n_dim)), device=self.device, dtype=self.float)
-        conformers = self.env.statebatch2conformerbatch(grid)
-
-        energies = self.env.proxy(*conformers)
-        energies_grid = energies.reshape(grid_size, grid_size).cpu()
         
-        # Plot heatmaps of the log reward and ground truth density
+        if self.env.n_dim == 2:
+            # Standard 2D grid (phi, psi)
+            grid = torch.tensor(list(product(angles_per_dim, repeat=2)), device=self.device, dtype=self.float)
+            energies = self.env.proxy(*self.env.statebatch2conformerbatch(grid))
+            energies_grid = energies.view(grid_size, grid_size).cpu()
+        
+        else:  # self.env.n_dim == 4
+            # 4D grid (phi, psi, omega1, omega2)
+            grid = torch.tensor(list(product(angles_per_dim, repeat=4)), device=self.device, dtype=self.float)
+            energies = self.env.proxy(*self.env.statebatch2conformerbatch(grid))
+            energies_grid = energies.view(grid_size, grid_size, grid_size, grid_size).cpu()
+            
+            # Marginalize over omega1 and omega2
+            energies_grid = energies_grid.sum(dim=(2, 3))  # Sum over last two dimensions
+            energies_grid /= grid_size ** 2  # Normalize
+        
+        # Compute log reward and expected density
         log_rewards = (-self.env.beta * energies_grid).clamp(min=self.config.gflownet.log_reward_min)
         expected_density = torch.exp(log_rewards)
         expected_density /= expected_density.sum()
+        
+        # Plot log reward
         fig, ax = plt.subplots()
         cax = ax.imshow(log_rewards.T, cmap="RdBu", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
         ax.set_title("Log Reward")
         fig.colorbar(cax)
         wandb.log({"log_reward": wandb.Image(fig)})
         plt.close(fig)
-
+        
         # Compute ground truth density
         ground_truth_density = torch.exp(-self.env.beta * energies_grid)
         
-        # Check for NaNs in the ground truth density
+        # Check for NaNs
         if torch.any(torch.isnan(ground_truth_density)):
             raise ValueError("NaNs encountered in ground truth density.")
         
-        # Normalize the density
-        ground_truth_density /= (ground_truth_density).sum()
-
-        # Plot the ground truth density
+        # Normalize
+        ground_truth_density /= ground_truth_density.sum()
+        
+        # Plot ground truth density
         fig, ax = plt.subplots()
-        cax = ax.imshow(ground_truth_density.view(grid_size, grid_size).T.cpu(), cmap="Reds", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
+        cax = ax.imshow(ground_truth_density.T.cpu(), cmap="Reds", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
         ax.set_title("Ground Truth Density")
         fig.colorbar(cax)
         wandb.log({"ground_truth_density": wandb.Image(fig)})
         plt.close(fig)
-
+        
         return expected_density.numpy(), ground_truth_density.numpy()
 
     def save_checkpoint(self, pbar, loss):
@@ -344,7 +358,7 @@ class GFlowNet:
         return histograms
     
     def compute_divergence_metrics(self, expected_density, ground_truth_density):
-        assert self.env.n_dim == 2, "Ground truth density can only be computed for 2D environments."
+        assert self.env.n_dim == 2 or self.env.smiles ==  b'CC(=O)N[C@@H](C)C(=O)NC', "Ground truth density can only be computed for 2D environments (or alanine dipeptide)."
 
         n_samples = self.logger_config.n_uniform_samples
         batch, _ = self.sample_batch(n_onpolicy=n_samples, n_replay=0)
@@ -358,14 +372,14 @@ class GFlowNet:
         # Compute divergence with expected density
         l1_div_e = np.mean(np.abs(expected_density - hist))
         kl_div_e = kl_divergence(expected_density, hist)
-        jsd_div_e = 0.5 * kl_divergence(expected_density, 0.5 * (expected_density + hist)) + 0.5 * kl_divergence(hist, 0.5 * (expected_density + hist))
+        js_div_e = 0.5 * kl_divergence(expected_density, 0.5 * (expected_density + hist)) + 0.5 * kl_divergence(hist, 0.5 * (expected_density + hist))
 
         # Compute divergence with ground truth density
         l1_div = np.mean(np.abs(ground_truth_density - hist))
         kl_div = kl_divergence(ground_truth_density, hist)
-        jsd_div = 0.5 * kl_divergence(ground_truth_density, 0.5 * (ground_truth_density + hist)) + 0.5 * kl_divergence(hist, 0.5 * (ground_truth_density + hist))
+        js_div = 0.5 * kl_divergence(ground_truth_density, 0.5 * (ground_truth_density + hist)) + 0.5 * kl_divergence(hist, 0.5 * (ground_truth_density + hist))
 
-        return (l1_div_e, l1_div), (kl_div_e, kl_div), (jsd_div_e, jsd_div)
+        return (l1_div_e, l1_div), (kl_div_e, kl_div), (js_div_e, js_div)
 
     def estimate_divergence_metrics(self):
         """
@@ -391,9 +405,9 @@ class GFlowNet:
         if any(np.isinf(kl_divs)):
             raise ValueError("KL divergence is infinite when computing the metric. This is likely due to a lack of samples during evaluation. Increase the number of samples and try again.")
 
-        jsd_divs = [0.5 * kl_divergence(histograms[dim], 0.5 * (histograms[dim] + histograms_policy[dim])) + 0.5 * kl_divergence(histograms_policy[dim], 0.5 * (histograms[dim] + histograms_policy[dim])) for dim in range(self.env.n_dim)]
+        js_divs = [0.5 * kl_divergence(histograms[dim], 0.5 * (histograms[dim] + histograms_policy[dim])) + 0.5 * kl_divergence(histograms_policy[dim], 0.5 * (histograms[dim] + histograms_policy[dim])) for dim in range(self.env.n_dim)]
 
-        return np.mean(l1_divs), np.mean(kl_divs), np.mean(jsd_divs) 
+        return np.mean(l1_divs), np.mean(kl_divs), np.mean(js_divs) 
     
     def visualise(self, pbar, loss):
         """Visualise samples from on-policy and the replay buffer.."""
