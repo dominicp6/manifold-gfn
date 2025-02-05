@@ -1,16 +1,18 @@
 name: gfnenv
 channels:
   - conda-forge
+  - nvidia
+  - pytorch
 dependencies:
   - python=3.12
+  - pip
   - xtb
   - ca-certificates
   - openssl
-  - pytorch==2.4.1
-  - torchvision==0.19.1
-  - torchaudio==2.4.1
-  - pytorch-cuda=12.4
-  - pyg
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda
   - certifi
   - numpy
   - pandas
@@ -29,4 +31,6 @@ dependencies:
   - pytorch3d
   - torchani
   - mdtraj
+  - pip:
+    - torch-geometric
 prefix: /home/sebidom/miniforge3/envs/gfnenv
