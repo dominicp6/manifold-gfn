@@ -243,11 +243,11 @@ class GFlowNet:
             if it % self.logger_config.checkpoint_interval == 0 and self.logger_config.checkpoints:
                 self.save_checkpoint(pbar, loss)
 
-            if it % self.logger_config.visualisation_interval == 0 and self.env.n_dim == 2:
+            if it % self.logger_config.visualisation_interval == 0 and (self.env.n_dim == 2 or self.env.smiles == b'CC(=O)N[C@@H](C)C(=O)NC'):
                 self.visualise(pbar, loss)
 
     def compute_ground_truth_density(self):
-        if self.env.n_dim not in [2, 4] or (self.env.n_dim == 2 and self.smiles != "CC(=O)N[C@@H](C)C(=O)NC"):
+        if self.env.n_dim not in [2, 4] or (self.env.n_dim == 2 and self.smiles != b'CC(=O)N[C@@H](C)C(=O)NC'):
             raise ValueError("Ground truth density can only be computed for 2D or 4D environments (alanine dipeptide).")
         
         grid_size = self.config.logging.num_bins
@@ -421,7 +421,7 @@ class GFlowNet:
 
         fig, axs = plt.subplot_mosaic(**mosaic)
 
-        onpolicy_batch, _ = self.sample_batch(n_onpolicy=5000, n_replay=0)
+        onpolicy_batch, _ = self.sample_batch(n_onpolicy=self.config.logging.n_visualisation_samples, n_replay=0)
         terminating_states = onpolicy_batch.get_terminating_states()
         
         axs[f"op_hist"].hist2d(terminating_states[:,0].cpu().numpy(), terminating_states[:,1].cpu().numpy(), bins=(20,20), density=True, cmap="Reds")
@@ -430,7 +430,7 @@ class GFlowNet:
         axs[f"op_1"].hist(terminating_states[:,0].cpu().numpy(), bins=20, density=True, color="red", alpha=0.5, linewidth=0.05)
         axs[f"op_2"].hist(terminating_states[:,1].cpu().numpy(), bins=20, density=True, color="red", alpha=0.5, linewidth=0.05)
 
-        terminating_states, _ = self.buffer.cyclic_buffer.sample(batch_size=5000)
+        terminating_states, _ = self.buffer.cyclic_buffer.sample(batch_size=min(self.config.logging.n_visualisation_samples, self.config.gflownet.regular_capacity))
 
         axs[f"rb_cyclic_hist"].hist2d(terminating_states[:,0].cpu().numpy(), terminating_states[:,1].cpu().numpy(), bins=(20,20), density=True, cmap="Greens")
         axs[f"rb_cyclic_hist"].set_xlim(-np.pi, np.pi)
@@ -438,7 +438,7 @@ class GFlowNet:
         axs[f"rb_cyclic_1"].hist(terminating_states[:,0].cpu().numpy(), bins=20, density=True, color="green", alpha=0.5, linewidth=0.05)
         axs[f"rb_cyclic_2"].hist(terminating_states[:,1].cpu().numpy(), bins=20, density=True, color="green", alpha=0.5, linewidth=0.05)
 
-        terminating_states, _ = self.buffer.priority_buffer.sample(batch_size=5000)
+        terminating_states, _ = self.buffer.priority_buffer.sample(batch_size=min(self.config.logging.n_visualisation_samples, self.config.gflownet.priority_capacity))
 
         axs[f"rb_priority_hist"].hist2d(terminating_states[:,0].cpu().numpy(), terminating_states[:,1].cpu().numpy(), bins=(20,20), density=True, cmap="Greens")
         axs[f"rb_priority_hist"].set_xlim(-np.pi, np.pi)
