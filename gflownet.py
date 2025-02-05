@@ -66,8 +66,7 @@ class GFlowNet:
                 raise ValueError(f"Logging directory {self.logging_dir} does not exist.")
         else:
             if self.config.logging.checkpoints:
-                date_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-                self.logging_dir = f"{config.logging.log_directory}/{date_time}"
+                self.logging_dir = f"{config.logging.log_directory}/{wandb.run.name}"
                 os.makedirs(self.logging_dir)
 
     def parameters(self):
