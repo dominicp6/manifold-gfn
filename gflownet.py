@@ -215,7 +215,7 @@ class GFlowNet:
         return loss
 
     def train(self, n_train_steps):
-        expected_density, ground_truth_density = self.compute_ground_truth_density()
+        expected_density, ground_truth_density = self.env.compute_ground_truth_density()
         pbar = tqdm(range(1, n_train_steps + 1))
         for it in pbar:
             self.it += 1
@@ -224,83 +224,26 @@ class GFlowNet:
                 loss = self.trajectorybalance_loss(batch) 
                 self.optimization_step(loss)
             self.buffer.add(on_policy_batch)
-            # Logging
-            wandb.log({"loss": loss.item(), 'logZ': self.logZ.sum().item(), "lr": self.opt.param_groups[0]['lr']})
-            pbar.set_description(f"Loss: {loss.item():.3f}, logZ: {self.logZ.sum().item():.3f}, lr: {self.opt.param_groups[0]['lr']:.3e}")
+            self.log(loss, it, pbar, expected_density, ground_truth_density)
 
-            if it % self.logger_config.log_interval == 0:
-                pbar.set_description(f"Loss: {loss.item():.3f} [Evaluating metrics]")
-                
-                if self.env.smiles == b'CC(=O)N[C@@H](C)C(=O)NC':
-                    # Currently these metrics only work for alanine dipeptide
-                    l1_divergence, kl_divergence, js_divergence = self.compute_divergence_metrics(expected_density, ground_truth_density)
-                else:
-                    l1_divergence, kl_divergence, js_divergence = self.estimate_divergence_metrics()
-                
-                wandb.log({"l1_divergence_e": l1_divergence[0], "kl_divergence_e": kl_divergence[0], "js_divergence_e": js_divergence[0]})
-                wandb.log({"l1_divergence": l1_divergence[1], "kl_divergence": kl_divergence[1], "js_divergence": js_divergence[1]})
+    def log(self, loss, it, pbar, expected_density, ground_truth_density):
+        wandb.log({"loss": loss.item(), 'logZ': self.logZ.sum().item(), "lr": self.opt.param_groups[0]['lr']})
+        pbar.set_description(f"Loss: {loss.item():.3f}, logZ: {self.logZ.sum().item():.3f}, lr: {self.opt.param_groups[0]['lr']:.3e}")
 
-            if it % self.logger_config.checkpoint_interval == 0 and self.logger_config.checkpoints:
-                self.save_checkpoint(pbar, loss)
-
-            if it % self.logger_config.visualisation_interval == 0 and (self.env.n_dim == 2 or self.env.smiles == b'CC(=O)N[C@@H](C)C(=O)NC'):
-                self.visualise(pbar, loss)
-
-    def compute_ground_truth_density(self):
-        if self.env.n_dim not in [2, 4] or (self.env.n_dim == 2 and self.smiles != b'CC(=O)N[C@@H](C)C(=O)NC'):
-            raise ValueError("Ground truth density can only be computed for 2D or 4D environments (alanine dipeptide).")
-        
-        grid_size = self.config.logging.num_bins
-        angles_per_dim = torch.linspace(-torch.pi, torch.pi, grid_size, device=self.device, dtype=self.float)
-        
-        if self.env.n_dim == 2:
-            # Standard 2D grid (phi, psi)
-            grid = torch.tensor(list(product(angles_per_dim, repeat=2)), device=self.device, dtype=self.float)
-            energies = self.env.proxy(*self.env.statebatch2conformerbatch(grid))
-            energies_grid = energies.view(grid_size, grid_size).cpu()
-        
-        else:  # self.env.n_dim == 4
-            # 4D grid (phi, psi, omega1, omega2)
-            grid = torch.tensor(list(product(angles_per_dim, repeat=4)), device=self.device, dtype=self.float)
-            energies = self.env.proxy(*self.env.statebatch2conformerbatch(grid))
-            energies_grid = energies.view(grid_size, grid_size, grid_size, grid_size).cpu()
+        if it % self.logger_config.log_interval == 0:
+            pbar.set_description(f"Loss: {loss.item():.3f} [Evaluating metrics]")
             
-            # Marginalize over omega1 and omega2
-            energies_grid = energies_grid.sum(dim=(2, 3))  # Sum over last two dimensions
-            energies_grid /= grid_size ** 2  # Normalize
-        
-        # Compute log reward and expected density
-        log_rewards = (-self.env.beta * energies_grid).clamp(min=self.config.gflownet.log_reward_min)
-        expected_density = torch.exp(log_rewards)
-        expected_density /= expected_density.sum()
-        
-        # Plot log reward
-        fig, ax = plt.subplots()
-        cax = ax.imshow(log_rewards.T, cmap="RdBu", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
-        ax.set_title("Log Reward")
-        fig.colorbar(cax)
-        wandb.log({"log_reward": wandb.Image(fig)})
-        plt.close(fig)
-        
-        # Compute ground truth density
-        ground_truth_density = torch.exp(-self.env.beta * energies_grid)
-        
-        # Check for NaNs
-        if torch.any(torch.isnan(ground_truth_density)):
-            raise ValueError("NaNs encountered in ground truth density.")
-        
-        # Normalize
-        ground_truth_density /= ground_truth_density.sum()
-        
-        # Plot ground truth density
-        fig, ax = plt.subplots()
-        cax = ax.imshow(ground_truth_density.T.cpu(), cmap="Reds", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
-        ax.set_title("Ground Truth Density")
-        fig.colorbar(cax)
-        wandb.log({"ground_truth_density": wandb.Image(fig)})
-        plt.close(fig)
-        
-        return expected_density.numpy(), ground_truth_density.numpy()
+            l1_divergence, kl_divergence, js_divergence = self.compute_divergence_metrics(expected_density, ground_truth_density)
+            # l1_divergence, kl_divergence, js_divergence = self.estimate_divergence_metrics()
+            
+            wandb.log({"l1_divergence_e": l1_divergence[0], "kl_divergence_e": kl_divergence[0], "js_divergence_e": js_divergence[0]})
+            wandb.log({"l1_divergence": l1_divergence[1], "kl_divergence": kl_divergence[1], "js_divergence": js_divergence[1]})
+
+        if it % self.logger_config.checkpoint_interval == 0 and self.logger_config.checkpoints:
+            self.save_checkpoint(pbar, loss)
+
+        if it % self.logger_config.visualisation_interval == 0 and (self.env.n_dim == 2 or self.env.smiles == b'CC(=O)N[C@@H](C)C(=O)NC'):
+            self.visualise(pbar, loss)
 
     def save_checkpoint(self, pbar, loss):
         pbar.set_description(f"Loss: {loss.item():.3f} [Saving checkpoint]")
@@ -327,39 +270,8 @@ class GFlowNet:
     def update_status_file(self):
         with open(f"{self.logging_dir}/status.txt", "w") as f:
             f.write(f"Checkpoint saved at step {self.it}\n")
-
-    def _compute_boltzman_weights(self, states):
-        # TODO: check that this is still correct
-        conformers = self.env.statebatch2conformerbatch(states)
-        energies = self.env.proxy(*conformers).cpu().numpy()
-        
-        if self.config.proxy.normalise:
-            energies = (energies + 1) * (self.env.proxy.max_energy - self.env.proxy.min_energy) 
-        
-        boltzmann_weights = np.exp( - energies * self.env.beta)
-
-        return boltzmann_weights
-    
-    def _compute_free_energy_histogram(self, states, boltzmann_weights, num_bins_per_dimension):
-        histograms = []
-        for dim in range(self.env.n_dim):
-            # Extract the angles for the current dimension
-            dim_marginal_states = states[:, dim].cpu().numpy()
-
-            # Compute the histogram and weights for the Boltzmann density
-            hist, _ = np.histogram(dim_marginal_states, bins=num_bins_per_dimension, range=(0, 2 * np.pi), weights=boltzmann_weights)
-            norm_counts, _ = np.histogram(dim_marginal_states, bins=num_bins_per_dimension, range=(0, 2 * np.pi))
-            average_density = np.divide(hist, norm_counts, out=np.zeros_like(hist), where=norm_counts > 0)
-            normalised_density = np.divide(average_density, np.sum(average_density))
-
-            # Store results
-            histograms.append(normalised_density)
-        
-        return histograms
     
     def compute_divergence_metrics(self, expected_density, ground_truth_density):
-        assert self.env.n_dim == 2 or self.env.smiles ==  b'CC(=O)N[C@@H](C)C(=O)NC', "Ground truth density can only be computed for 2D environments (or alanine dipeptide)."
-
         n_samples = self.logger_config.n_uniform_samples
         batch, _ = self.sample_batch(n_onpolicy=n_samples, n_replay=0)
         terminating_states = batch.get_terminating_states()
@@ -447,3 +359,63 @@ class GFlowNet:
         axs[f"rb_priority_2"].hist(terminating_states[:,1].cpu().numpy(), bins=20, density=True, color="green", alpha=0.5, linewidth=0.05)
 
         wandb.log({"visualisation": wandb.Image(fig)})
+
+
+    # def compute_ground_truth_density(self):
+    #     if self.env.n_dim not in [2, 4] or (self.env.n_dim == 2 and self.env.smiles != b'CC(=O)N[C@@H](C)C(=O)NC'):
+    #         raise ValueError("Ground truth density can only be computed for 2D or 4D environments (alanine dipeptide).")
+        
+    #     grid_size = self.config.logging.num_bins
+    #     angles_per_dim = torch.linspace(-torch.pi, torch.pi, grid_size, device=self.device, dtype=self.float)
+    #     fine_grid_size = grid_size * upscale_factor
+
+    #     angles_per_dim_fine = torch.linspace(-torch.pi, torch.pi, fine_grid_size, device=self.device, dtype=self.float)
+        
+    #     if self.env.n_dim == 2:
+    #         # Standard 2D grid (phi, psi)
+    #         grid = torch.tensor(list(product(angles_per_dim, repeat=2)), device=self.device, dtype=self.float)
+    #         energies = self.env.proxy(*self.env.statebatch2conformerbatch(grid))
+    #         energies_grid = energies.view(grid_size, grid_size).cpu()
+        
+    #     else:  # self.env.n_dim == 4
+    #         # 4D grid (phi, psi, omega1, omega2)
+    #         grid = torch.tensor(list(product(angles_per_dim, repeat=4)), device=self.device, dtype=self.float)
+    #         energies = self.env.proxy(*self.env.statebatch2conformerbatch(grid))
+    #         energies_grid = energies.view(grid_size, grid_size, grid_size, grid_size).cpu()
+            
+    #         # Marginalize over omega1 and omega2
+    #         energies_grid = energies_grid.sum(dim=(2, 3))  # Sum over last two dimensions
+    #         energies_grid /= grid_size ** 2  # Normalize
+        
+    #     # Compute log reward and expected density
+    #     log_rewards = (-self.env.beta * energies_grid).clamp(min=self.config.gflownet.log_reward_min)
+    #     expected_density = torch.exp(log_rewards)
+    #     expected_density /= expected_density.sum()
+        
+    #     # Plot log reward
+    #     fig, ax = plt.subplots()
+    #     cax = ax.imshow(log_rewards.T, cmap="RdBu", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
+    #     ax.set_title("Log Reward")
+    #     fig.colorbar(cax)
+    #     wandb.log({"log_reward": wandb.Image(fig)})
+    #     plt.close(fig)
+        
+    #     # Compute ground truth density
+    #     ground_truth_density = torch.exp(-self.env.beta * energies_grid)
+        
+    #     # Check for NaNs
+    #     if torch.any(torch.isnan(ground_truth_density)):
+    #         raise ValueError("NaNs encountered in ground truth density.")
+        
+    #     # Normalize
+    #     ground_truth_density /= ground_truth_density.sum()
+        
+    #     # Plot ground truth density
+    #     fig, ax = plt.subplots()
+    #     cax = ax.imshow(ground_truth_density.T.cpu(), cmap="Reds", extent=(-np.pi, np.pi, -np.pi, np.pi), origin="lower")
+    #     ax.set_title("Ground Truth Density")
+    #     fig.colorbar(cax)
+    #     wandb.log({"ground_truth_density": wandb.Image(fig)})
+    #     plt.close(fig)
+        
+    #     return expected_density.numpy(), ground_truth_density.numpy()
