@@ -48,7 +48,6 @@ class Experiment:
          else:
             self._initialize_from_checkpoint(checkpoint)
 
-         self.save_config()
          print(f"Initialised molecule {self.env.smiles}")
          print(f"Number of torsion angles: {len(self.env.torsion_angles)}")
          print(f"Encoding multiplier: {self.config.env.encoding_multiplier}")
@@ -152,6 +151,12 @@ class Experiment:
             wandb.init(project=self.exp_name, config=self.config_dict)
          else:
             wandb.init(project=self.exp_name, config=self.checkpoint_file["config"])
+
+         if self.gfn.logging_dir is None:
+            if self.config.logging.checkpoints:
+                self.logging_dir = f"{self.config.logging.log_directory}/{wandb.run.name}"
+                os.makedirs(self.logging_dir)
+         self.save_config()
          self.gfn.train(n_train_steps=n_train_steps)
 
       def visualise_molecule_3D(self):

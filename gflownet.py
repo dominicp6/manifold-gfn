@@ -58,16 +58,13 @@ class GFlowNet:
 
         # Logging
         self.logger_config = config.logging
+        self.logging_dir = None
         if logging_dir is not None:
             assert self.config.logging.checkpoints, "Checkpoints must be enabled to use a custom logging directory."
             self.logging_dir = logging_dir
             # Check that the directory exists
             if not os.path.exists(self.logging_dir):
                 raise ValueError(f"Logging directory {self.logging_dir} does not exist.")
-        else:
-            if self.config.logging.checkpoints:
-                self.logging_dir = f"{config.logging.log_directory}/{wandb.run.name}"
-                os.makedirs(self.logging_dir)
 
     def parameters(self):
         return list(self.forward_policy.model.parameters()) + list(self.backward_policy.model.parameters())
