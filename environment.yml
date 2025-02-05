@@ -33,4 +33,6 @@ dependencies:
   - mdtraj
   - pip:
     - torch-geometric
+    - py3dmol
+    - torchtyping
 prefix: /home/sebidom/miniforge3/envs/gfnenv
