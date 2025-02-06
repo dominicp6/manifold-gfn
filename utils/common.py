@@ -1,22 +1,17 @@
 import os
 import random
-from os.path import expandvars
-from pathlib import Path
 from typing import List, Union
 
 import numpy as np
 import torch
-from hydra import compose, initialize_config_dir
-from hydra.utils import get_original_cwd, instantiate
-from omegaconf import OmegaConf
 from torchtyping import TensorType
 
 
 def set_device(device: Union[str, torch.device]):
     if isinstance(device, torch.device):
         return device
-    if device.lower() == "cuda" and torch.cuda.is_available():
-        return torch.device("cuda")
+    if (device.lower() == "cuda" or (device.lower().startswith("cuda:") and device.lower()[5:].isdigit())) and torch.cuda.is_available():
+        return torch.device(device.lower())
     else:
         return torch.device("cpu")
 

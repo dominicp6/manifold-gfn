@@ -2,10 +2,8 @@
 GFlowNet
 """
 import os
-from datetime import datetime
 from typing import Optional
-from copy import copy
-from itertools import chain, product
+from itertools import chain
 
 import wandb
 import numpy as np

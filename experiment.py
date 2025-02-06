@@ -154,8 +154,8 @@ class Experiment:
 
          if self.gfn.logging_dir is None:
             if self.config.logging.checkpoints:
-                self.logging_dir = f"{self.config.logging.log_directory}/{wandb.run.name}"
-                os.makedirs(self.logging_dir)
+                self.gfn.logging_dir = f"{self.config.logging.log_directory}/{wandb.run.name}"
+                os.makedirs(self.gfn.logging_dir)
          self.save_config()
          self.gfn.train(n_train_steps=n_train_steps)
 
