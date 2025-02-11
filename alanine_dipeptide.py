@@ -89,9 +89,13 @@ class AlanineDipeptide(ConformerEnvironment):
                 pbar.update(1)
 
             # Marginalize over omega1 and omega2 (assumed to be the last two dimensions)
-            energies_grid = energies_grid.mean(dim=(2, 3))
+            boltzmann_weights = torch.exp(-self.beta * energies_grid)
+            weighted_energies_grid = energies_grid * boltzmann_weights
+            weighted_energies_grid = weighted_energies_grid.sum(dim=(2, 3))
+            normalizing_constant = boltzmann_weights.sum(dim=(2, 3))
+            energies_grid = weighted_energies_grid / normalizing_constant
 
-        log_rewards = (-self.beta * energies_grid).clamp(min=self.config.gflownet.log_reward_min)
+        log_rewards = (-self.beta * energies_grid)
         expected_density = torch.exp(log_rewards)
         expected_density /= expected_density.sum()
         
