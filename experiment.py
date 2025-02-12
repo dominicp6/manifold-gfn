@@ -1,5 +1,7 @@
 import os
+import random
 import json
+from datetime import datetime
 
 import py3Dmol
 import wandb
@@ -7,12 +9,24 @@ import torch
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem import Draw
+import numpy as np
 
 from alanine_dipeptide import AlanineDipeptide
 from proxy import TorchANIMoleculeEnergy
 from policy import MLP_Policy, Uniform_Policy
 from gflownet import GFlowNet
 
+
+
+def set_seed(seed = None):
+   if seed is None:
+      # Get a random seed from the current clock time
+      seed = int(datetime.now().timestamp())
+   
+   random.seed(seed)
+   np.random.seed(seed)
+   torch.manual_seed(seed)
+   torch.cuda.manual_seed_all(seed)
 
 class Config:
    def __init__(self, dictionary):
@@ -35,9 +49,10 @@ class Config:
 
 class Experiment:
       
-      def __init__(self, exp_name="debug_run", checkpoint=None, config=None):
+      def __init__(self, exp_name="debug_run", checkpoint=None, config=None, seed=None):
          assert checkpoint is not None or config is not None, "Either a checkpoint or a config must be provided."
 
+         set_seed(seed)
          self.config_dict = config
          self.exp_name = exp_name
          self.using_checkpoint = checkpoint is not None
