@@ -236,7 +236,7 @@ class GFlowNet:
         if it % self.logger_config.checkpoint_interval == 0 and self.logger_config.checkpoints:
             self.save_checkpoint(pbar, loss)
 
-        if it % self.logger_config.visualisation_interval == 0 and (self.env.n_dim == 2 or self.env.smiles == b'CC(=O)N[C@@H](C)C(=O)NC'):
+        if it % self.logger_config.visualisation_interval == 0 and (self.env.n_dim == 2 or self.env.smiles == 'CC(=O)N[C@@H](C)C(=O)NC'):
             self.visualise(pbar, loss)
 
     def save_checkpoint(self, pbar, loss):

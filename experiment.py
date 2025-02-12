@@ -22,7 +22,7 @@ def set_seed(seed = None):
    if seed is None:
       # Get a random seed from the current clock time
       seed = int(datetime.now().timestamp())
-   
+   print(f"Setting seed to {seed}")
    random.seed(seed)
    np.random.seed(seed)
    torch.manual_seed(seed)
